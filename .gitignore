@@ -98,3 +98,6 @@ backend/crater
 
 # Local debug scripts
 crater-agent/test_openai.py
+
+# Codex CLI artifacts
+.codex

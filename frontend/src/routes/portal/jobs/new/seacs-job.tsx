@@ -20,7 +20,7 @@ import { createFileRoute } from '@tanstack/react-router'
 import { t } from 'i18next'
 import { useAtomValue } from 'jotai'
 import { CpuIcon, LayoutGridIcon, XIcon } from 'lucide-react'
-import { ChevronLeftIcon, CircleArrowDown, CircleArrowUp, CirclePlus } from 'lucide-react'
+import { ChevronLeftIcon, CircleArrowDown, CircleArrowUp } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { useFieldArray, useForm } from 'react-hook-form'
 import { toast } from 'sonner'
@@ -45,12 +45,16 @@ import { EnvFormCard } from '@/components/form/env-form-field'
 import FormLabelMust from '@/components/form/form-label-must'
 import { ImageFormField } from '@/components/form/image-form-field'
 import { OtherOptionsFormCard } from '@/components/form/other-options-form-field'
+import { CreateBillingBlockDialog } from '@/components/job/create-billing-block-dialog'
+import { JobSubmitButton } from '@/components/job/job-submit-button'
 import { publishValidateSearch } from '@/components/job/publish'
 import CardTitle from '@/components/label/card-title'
 import { ProgressBar } from '@/components/ui-custom/colorful-progress'
 
 import { IDlAnalyze, apiDlAnalyze } from '@/services/api/recommend/dl-task'
 import { apiJobTemplate, apiSparseCreate } from '@/services/api/vcjob'
+
+import { useJobCreateBillingBlockDialog } from '@/hooks/use-job-create-billing-block'
 
 import {
   VolumeMountType,
@@ -65,6 +69,7 @@ import {
   volumeMountsSchema,
 } from '@/utils/form'
 import { atomUserInfo } from '@/utils/store'
+import { showErrorToast } from '@/utils/toast'
 
 import { cn } from '@/lib/utils'
 
@@ -118,6 +123,8 @@ function RouteComponent() {
   const [otherOpen, setOtherOpen] = useState<boolean>(false)
   const router = useRouter()
   const queryClient = useQueryClient()
+  const { billingBlockDialogOpen, setBillingBlockDialogOpen, handleJobCreateError } =
+    useJobCreateBillingBlockDialog()
   const user = useAtomValue(atomUserInfo)
 
   const { mutate: createTask, isPending } = useMutation({
@@ -166,6 +173,12 @@ function RouteComponent() {
       ])
       toast.success(`作业 ${jobName} 创建成功`)
       router.history.back()
+    },
+    onError: (error) => {
+      if (handleJobCreateError(error)) {
+        return
+      }
+      showErrorToast(error)
     },
   })
 
@@ -293,6 +306,10 @@ function RouteComponent() {
 
   return (
     <>
+      <CreateBillingBlockDialog
+        open={billingBlockDialogOpen}
+        onOpenChange={setBillingBlockDialogOpen}
+      />
       <Form {...form}>
         <form
           onSubmit={form.handleSubmit(onSubmit)}
@@ -364,10 +381,7 @@ function RouteComponent() {
                 <CircleArrowUp className="size-4" />
                 导出配置
               </Button>
-              <Button type="submit">
-                <CirclePlus className="size-4" />
-                提交作业
-              </Button>
+              <JobSubmitButton isLoading={isPending} />
             </div>
           </div>
           <Card className="lg:col-span-2">

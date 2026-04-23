@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { UseQueryResult, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, createFileRoute } from '@tanstack/react-router'
 import { ColumnDef } from '@tanstack/react-table'
 import { t } from 'i18next'
@@ -28,10 +28,13 @@ import JobPhaseLabel from '@/components/badge/job-phase-badge'
 import JobTypeLabel from '@/components/badge/job-type-badge'
 import NodeBadges from '@/components/badge/node-badges'
 import ResourceBadges from '@/components/badge/resource-badges'
+import ScheduleTypeLabel from '@/components/badge/schedule-type-badge'
 import DocsButton from '@/components/button/docs-button'
+import { BillingPointsBadge } from '@/components/custom/billing-points-badge'
 import { TimeDistance } from '@/components/custom/time-distance'
 import CodeServerIcon from '@/components/icon/code-server-icon'
 import JupyterIcon from '@/components/icon/jupyter-icon'
+import JobResourceSummary from '@/components/job/job-resource-summary'
 import ListedNewJobButton from '@/components/job/new-job-button'
 import { JobActionsMenu } from '@/components/job/overview/job-actions-menu'
 import { getHeader, jobToolbarConfig } from '@/components/job/statuses'
@@ -40,14 +43,20 @@ import SimpleTooltip from '@/components/label/simple-tooltip'
 import { DataTable } from '@/components/query-table'
 import { DataTableColumnHeader } from '@/components/query-table/column-header'
 
+import { apiJobBillingList } from '@/services/api/billing'
+import { apiGetBillingStatus } from '@/services/api/system-config'
 import {
+  IJobInfo,
   JobPhase,
+  JobType,
+  ScheduleType,
   apiJobDelete,
   apiJobInteractiveList,
+  getUnifiedJobPhase,
   isInteracitveJob,
 } from '@/services/api/vcjob'
-import { IJobInfo, JobType } from '@/services/api/vcjob'
 
+import { isBillingVisibleForUser } from '@/utils/billing-visibility'
 import { logger } from '@/utils/loglevel'
 
 import { REFETCH_INTERVAL } from '@/lib/constants'
@@ -61,9 +70,16 @@ export const Route = createFileRoute('/portal/jobs/inter/')({
   component: RouteComponent,
 })
 
+type JobTableRow = IJobInfo & { billedPointsTotal?: number }
+
 function RouteComponent() {
   const { t: translate } = useTranslation()
   const queryClient = useQueryClient()
+  const { data: billingStatus } = useQuery({
+    queryKey: ['system-config', 'billing-status'],
+    queryFn: () => apiGetBillingStatus().then((res) => res.data),
+  })
+  const billingVisible = isBillingVisibleForUser(billingStatus)
 
   const interactiveQuery = useQuery({
     queryKey: ['job', 'interactive'],
@@ -71,6 +87,42 @@ function RouteComponent() {
     select: (res) => res.data.filter((task) => isInteracitveJob(task.jobType)),
     refetchInterval: REFETCH_INTERVAL,
   })
+  const billingQuery = useQuery({
+    queryKey: ['job', 'billing'],
+    queryFn: apiJobBillingList,
+    select: (res) =>
+      res.data.reduce<Record<string, number>>((acc, item) => {
+        acc[item.jobName] = item.billedPointsTotal
+        return acc
+      }, {}),
+    refetchInterval: REFETCH_INTERVAL,
+    enabled: billingVisible,
+  })
+  const mergedInteractiveQuery = useMemo(
+    () =>
+      ({
+        data: (interactiveQuery.data ?? []).map((job) => ({
+          ...job,
+          billedPointsTotal: billingQuery.data?.[job.jobName] ?? 0,
+        })),
+        isLoading: interactiveQuery.isLoading || (billingVisible && billingQuery.isLoading),
+        dataUpdatedAt: Math.max(
+          interactiveQuery.dataUpdatedAt,
+          billingVisible ? billingQuery.dataUpdatedAt : 0
+        ),
+        refetch: interactiveQuery.refetch,
+      }) as unknown as UseQueryResult<JobTableRow[], Error>,
+    [
+      billingVisible,
+      billingQuery.data,
+      billingQuery.dataUpdatedAt,
+      billingQuery.isLoading,
+      interactiveQuery.data,
+      interactiveQuery.dataUpdatedAt,
+      interactiveQuery.isLoading,
+      interactiveQuery.refetch,
+    ]
+  )
 
   const refetchTaskList = async () => {
     try {
@@ -80,7 +132,13 @@ function RouteComponent() {
           queryClient.invalidateQueries({ queryKey: ['job'] })
         ),
         new Promise((resolve) => setTimeout(resolve, 200)).then(() =>
+          queryClient.invalidateQueries({ queryKey: ['job', 'billing'] })
+        ),
+        new Promise((resolve) => setTimeout(resolve, 200)).then(() =>
           queryClient.invalidateQueries({ queryKey: ['context', 'quota'] })
+        ),
+        new Promise((resolve) => setTimeout(resolve, 200)).then(() =>
+          queryClient.invalidateQueries({ queryKey: ['context', 'job-resource-summary'] })
         ),
       ])
     } catch (error) {
@@ -96,7 +154,7 @@ function RouteComponent() {
     },
   })
 
-  const interColumns = useMemo<ColumnDef<IJobInfo>[]>(
+  const interColumns = useMemo<ColumnDef<JobTableRow>[]>(
     () => [
       {
         accessorKey: 'jobType',
@@ -106,12 +164,24 @@ function RouteComponent() {
         cell: ({ row }) => <JobTypeLabel jobType={row.getValue<JobType>('jobType')} />,
       },
       {
+        accessorFn: (row) => String(row.scheduleType ?? ScheduleType.Normal),
+        id: 'scheduleType',
+        header: ({ column }) => (
+          <DataTableColumnHeader column={column} title={getHeader('scheduleType')} />
+        ),
+        cell: ({ row }) => <ScheduleTypeLabel scheduleType={row.original.scheduleType} />,
+        filterFn: (row, id, value) => {
+          return (value as string[]).includes(row.getValue(id))
+        },
+      },
+      {
         accessorKey: 'name',
         header: ({ column }) => <DataTableColumnHeader column={column} title={getHeader('name')} />,
         cell: ({ row }) => <JobNameCell jobInfo={row.original} />,
       },
       {
-        accessorKey: 'status',
+        accessorFn: (row) => getUnifiedJobPhase(row.status),
+        id: 'status',
         header: ({ column }) => (
           <DataTableColumnHeader column={column} title={getHeader('status')} />
         ),
@@ -142,6 +212,15 @@ function RouteComponent() {
           return <ResourceBadges resources={resources} />
         },
       },
+      ...(billingVisible
+        ? [
+            {
+              accessorKey: 'billedPointsTotal',
+              header: ({ column }) => <DataTableColumnHeader column={column} title="累计点数" />,
+              cell: ({ row }) => <BillingPointsBadge value={row.original.billedPointsTotal ?? 0} />,
+            } as ColumnDef<JobTableRow>,
+          ]
+        : []),
       {
         accessorKey: 'createdAt',
         header: ({ column }) => (
@@ -225,7 +304,7 @@ function RouteComponent() {
         },
       },
     ],
-    [deleteTask]
+    [billingVisible, deleteTask]
   )
 
   return (
@@ -235,9 +314,10 @@ function RouteComponent() {
         description: '提供开箱即用的 Jupyter Lab， 可用于测试、调试等',
       }}
       storageKey="portal_job_interactive"
-      query={interactiveQuery}
+      query={mergedInteractiveQuery}
       columns={interColumns}
       toolbarConfig={jobToolbarConfig}
+      briefChildren={<JobResourceSummary />}
       multipleHandlers={[
         {
           title: (rows) => translate('jobs.handlers.stopOrDeleteTitle', { count: rows.length }),

@@ -11,10 +11,8 @@ import (
 	batch "volcano.sh/apis/pkg/apis/batch/v1alpha1"
 	bus "volcano.sh/apis/pkg/apis/bus/v1alpha1"
 
-	"github.com/raids-lab/crater/dao/model"
 	"github.com/raids-lab/crater/internal/resputil"
 	"github.com/raids-lab/crater/internal/util"
-	"github.com/raids-lab/crater/pkg/aitaskctl"
 	"github.com/raids-lab/crater/pkg/config"
 	"github.com/raids-lab/crater/pkg/utils"
 	"github.com/raids-lab/crater/pkg/vcqueue"
@@ -52,10 +50,17 @@ func (mgr *VolcanojobMgr) CreateTrainingJob(c *gin.Context) {
 		resputil.BadRequestError(c, err.Error())
 		return
 	}
-
-	exceededResources := aitaskctl.CheckResourcesBeforeCreateJob(c, token.UserID, token.AccountID)
-	if len(exceededResources) > 0 {
-		resputil.Error(c, fmt.Sprintf("%v", exceededResources), resputil.NotSpecified)
+	scheduleType, err := req.validateScheduleOptions(true)
+	if err != nil {
+		resputil.BadRequestError(c, err.Error())
+		return
+	}
+	scheduleMetadata, err := mgr.resolveJobScheduleMetadata(c.Request.Context(), scheduleType)
+	if err != nil {
+		resputil.Error(c, err.Error(), resputil.ServiceError)
+		return
+	}
+	if !mgr.preCheckCreateJob(c, token, scheduleType, false) {
 		return
 	}
 
@@ -84,9 +89,8 @@ func (mgr *VolcanojobMgr) CreateTrainingJob(c *gin.Context) {
 		CraterJobTypeCustom,
 		token,
 		baseURL,
-		req.Name,
-		req.Template,
-		req.AlertEnabled,
+		&req.CreateJobCommon,
+		scheduleMetadata,
 	)
 
 	// 5. Create the pod spec
@@ -96,10 +100,7 @@ func (mgr *VolcanojobMgr) CreateTrainingJob(c *gin.Context) {
 		return
 	}
 
-	queueName := token.AccountName
-	if token.AccountID != model.DefaultAccountID {
-		queueName = vcqueue.GetUserQueueName(token.AccountID, token.UserID)
-	}
+	queueName := vcqueue.ResolveJobQueueName(token)
 	// 6. Create volcano job
 	job := batch.Job{
 		ObjectMeta: metav1.ObjectMeta{
@@ -109,7 +110,7 @@ func (mgr *VolcanojobMgr) CreateTrainingJob(c *gin.Context) {
 			Annotations: jobAnnotations,
 		},
 		Spec: batch.JobSpec{
-			TTLSecondsAfterFinished: ptr.To(ThreeDaySeconds),
+			TTLSecondsAfterFinished: ptr.To(SevenDaySeconds),
 			MinAvailable:            1,
 			MaxRetry:                1,
 			SchedulerName:           VolcanoSchedulerName,
@@ -142,13 +143,7 @@ func (mgr *VolcanojobMgr) CreateTrainingJob(c *gin.Context) {
 		},
 	}
 
-	if err = mgr.client.Create(c, &job); err != nil {
-		resputil.Error(c, err.Error(), resputil.NotSpecified)
-		return
-	}
-
-	// create forward ing rules in template
-	if err := mgr.CreateForwardIngresses(c, &job, req.Forwards, labels, token.Username); err != nil {
+	if err = mgr.submitJob(c, token, &job); err != nil {
 		resputil.Error(c, err.Error(), resputil.NotSpecified)
 		return
 	}
@@ -168,7 +163,6 @@ func GenerateCustomPodSpec(
 
 	baseAffinity := GenerateNodeAffinity(custom.Selectors, custom.Resource)
 	affinity := GenerateArchitectureNodeAffinity(custom.Image, baseAffinity)
-	fmt.Printf("Affinity generated: %+v\n", affinity)
 	tolerations := GenerateTaintTolerationsForAccount(token)
 	envs := GenerateEnvs(ctx, token, custom.Envs)
 

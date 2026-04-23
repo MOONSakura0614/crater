@@ -10,7 +10,6 @@ import (
 	batch "volcano.sh/apis/pkg/apis/batch/v1alpha1"
 	bus "volcano.sh/apis/pkg/apis/bus/v1alpha1"
 
-	"github.com/raids-lab/crater/dao/model"
 	"github.com/raids-lab/crater/internal/resputil"
 	"github.com/raids-lab/crater/internal/util"
 	"github.com/raids-lab/crater/pkg/aitaskctl"
@@ -63,15 +62,23 @@ func (mgr *VolcanojobMgr) CreateTensorflowJob(c *gin.Context) {
 		resputil.BadRequestError(c, err.Error())
 		return
 	}
+	scheduleType, err := req.validateScheduleOptions(false)
+	if err != nil {
+		resputil.BadRequestError(c, err.Error())
+		return
+	}
+	if !mgr.preCheckCreateJob(c, token, scheduleType, false) {
+		return
+	}
+	scheduleMetadata, err := mgr.resolveJobScheduleMetadata(c.Request.Context(), scheduleType)
+	if err != nil {
+		resputil.Error(c, err.Error(), resputil.ServiceError)
+		return
+	}
 
 	jobResources := v1.ResourceList{}
 	for i := range len(req.Tasks) {
 		jobResources = aitaskctl.AddResourceList(jobResources, req.Tasks[i].Resource)
-	}
-	exceededResources := aitaskctl.CheckResourcesBeforeCreateJob(c, token.UserID, token.AccountID)
-	if len(exceededResources) > 0 {
-		resputil.Error(c, fmt.Sprintf("%v", exceededResources), resputil.NotSpecified)
-		return
 	}
 
 	if err := vcqueue.EnsureAccountQueueExists(c, mgr.client, token, token.AccountID); err != nil {
@@ -111,9 +118,8 @@ func (mgr *VolcanojobMgr) CreateTensorflowJob(c *gin.Context) {
 		CraterJobTypeTensorflow,
 		token,
 		baseURL,
-		req.Name,
-		req.Template,
-		req.AlertEnabled,
+		&req.CreateJobCommon,
+		scheduleMetadata,
 	)
 
 	// 4. Create the task spec
@@ -163,10 +169,7 @@ func (mgr *VolcanojobMgr) CreateTensorflowJob(c *gin.Context) {
 		tasks[i] = taskSpec
 	}
 
-	queueName := token.AccountName
-	if token.AccountID != model.DefaultAccountID {
-		queueName = vcqueue.GetUserQueueName(token.AccountID, token.UserID)
-	}
+	queueName := vcqueue.ResolveJobQueueName(token)
 	// 5. Create volcano job
 	job := batch.Job{
 		ObjectMeta: metav1.ObjectMeta{
@@ -176,7 +179,7 @@ func (mgr *VolcanojobMgr) CreateTensorflowJob(c *gin.Context) {
 			Annotations: jobAnnotations,
 		},
 		Spec: batch.JobSpec{
-			TTLSecondsAfterFinished: ptr.To(ThreeDaySeconds),
+			TTLSecondsAfterFinished: ptr.To(SevenDaySeconds),
 			MinAvailable:            minAvailable,
 			SchedulerName:           VolcanoSchedulerName,
 			Plugins: map[string][]string{
@@ -194,7 +197,7 @@ func (mgr *VolcanojobMgr) CreateTensorflowJob(c *gin.Context) {
 		},
 	}
 
-	if err = mgr.client.Create(c, &job); err != nil {
+	if err = mgr.submitJob(c, token, &job); err != nil {
 		resputil.Error(c, err.Error(), resputil.NotSpecified)
 		return
 	}

@@ -2,6 +2,7 @@ package vcjob
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -24,13 +25,17 @@ import (
 	"github.com/raids-lab/crater/dao/query"
 	"github.com/raids-lab/crater/internal/handler"
 	"github.com/raids-lab/crater/internal/resputil"
+	"github.com/raids-lab/crater/internal/service"
+	vcjobservice "github.com/raids-lab/crater/internal/service/vcjob"
 	"github.com/raids-lab/crater/internal/util"
+	"github.com/raids-lab/crater/pkg/aitaskctl"
 	"github.com/raids-lab/crater/pkg/config"
 	"github.com/raids-lab/crater/pkg/constants"
 	"github.com/raids-lab/crater/pkg/crclient"
 	"github.com/raids-lab/crater/pkg/imageregistry"
 	"github.com/raids-lab/crater/pkg/monitor"
 	"github.com/raids-lab/crater/pkg/packer"
+	"github.com/raids-lab/crater/pkg/prequeuewatcher"
 	"github.com/raids-lab/crater/pkg/utils"
 )
 
@@ -40,24 +45,32 @@ func init() {
 }
 
 type VolcanojobMgr struct {
-	name           string
-	client         client.Client
-	config         *rest.Config
-	kubeClient     kubernetes.Interface
-	imagePacker    packer.ImagePackerInterface
-	imageRegistry  imageregistry.ImageRegistryInterface
-	serviceManager crclient.ServiceManagerInterface
+	name            string
+	client          client.Client
+	config          *rest.Config
+	kubeClient      kubernetes.Interface
+	imagePacker     packer.ImagePackerInterface
+	imageRegistry   imageregistry.ImageRegistryInterface
+	serviceManager  crclient.ServiceManagerInterface
+	configService   *service.ConfigService
+	queueQuotaSvc   *service.PrequeueService
+	prequeueWatcher *prequeuewatcher.PrequeueWatcher
+	billingService  *service.BillingService
 }
 
 func NewVolcanojobMgr(conf *handler.RegisterConfig) handler.Manager {
 	return &VolcanojobMgr{
-		name:           "vcjobs",
-		client:         conf.Client,
-		config:         conf.KubeConfig,
-		kubeClient:     conf.KubeClient,
-		imagePacker:    conf.ImagePacker,
-		imageRegistry:  conf.ImageRegistry,
-		serviceManager: conf.ServiceManager,
+		name:            "vcjobs",
+		client:          conf.Client,
+		config:          conf.KubeConfig,
+		kubeClient:      conf.KubeClient,
+		imagePacker:     conf.ImagePacker,
+		imageRegistry:   conf.ImageRegistry,
+		serviceManager:  conf.ServiceManager,
+		configService:   conf.ConfigService,
+		queueQuotaSvc:   conf.PrequeueService,
+		prequeueWatcher: conf.PrequeueWatcher,
+		billingService:  conf.BillingService,
 	}
 }
 
@@ -69,9 +82,13 @@ func (mgr *VolcanojobMgr) RegisterProtected(g *gin.RouterGroup) {
 	g.GET("", mgr.GetSelfJobs)
 	g.GET("all", mgr.GetAllJobsInDays)
 	g.GET("user/:username", mgr.GetUserJobsInDays)
+	g.GET("billing", mgr.GetSelfJobBilling)
+	g.GET("billing/all", mgr.GetAllJobBillingInDays)
+	g.GET("billing/user/:username", mgr.GetUserJobBillingInDays)
 	g.DELETE(":name", mgr.DeleteJob)
 
 	g.GET(":name/detail", mgr.GetJobDetail)
+	g.GET(":name/billing", mgr.GetJobBillingDetail)
 	g.GET(":name/yaml", mgr.GetJobYaml)
 	g.GET(":name/pods", mgr.GetJobPods)
 	g.GET(":name/template", mgr.GetJobTemplate)
@@ -105,6 +122,9 @@ func (mgr *VolcanojobMgr) RegisterProtected(g *gin.RouterGroup) {
 func (mgr *VolcanojobMgr) RegisterAdmin(g *gin.RouterGroup) {
 	g.GET("", mgr.GetAllJobsInDays)
 	g.GET("user/:username", mgr.GetUserJobsInDays)
+	g.GET("billing", mgr.GetAllJobBillingInDays)
+	g.GET("billing/user/:username", mgr.GetUserJobBillingInDays)
+	g.GET(":name/billing", mgr.GetJobBillingDetail)
 	// delete job
 	g.DELETE(":name", mgr.AdminDeleteJob)
 }
@@ -112,13 +132,17 @@ func (mgr *VolcanojobMgr) RegisterAdmin(g *gin.RouterGroup) {
 const (
 	VolcanoSchedulerName = "volcano"
 
-	AnnotationKeyUser         = "crater.raids.io/user"          // 用户名，以小写字母开头
-	AnnotationKeyTaskName     = "crater.raids.io/task-name"     // 任务名称（可能是中文）
-	AnnotationKeyTaskTemplate = "crater.raids.io/task-template" // 任务模板
-	AnnotationKeyJupyter      = "crater.raids.io/jupyter-token" // Jupyter token cache
-	AnnotationKeyWebIDE       = "crater.raids.io/webide-token"  // WebIDE token cache
-	AnnotationKeyAlertEnabled = "crater.raids.io/alert-enabled" // 是否开启告警
-	AnnotationKeySSHEnabled   = "crater.raids.io/ssh-enabled"   // SSH 缓存，格式为 "ip:port"
+	AnnotationKeyUser                    = "crater.raids.io/user"          // 用户名，以小写字母开头
+	AnnotationKeyTaskName                = "crater.raids.io/task-name"     // 任务名称（可能是中文）
+	AnnotationKeyTaskTemplate            = "crater.raids.io/task-template" // 任务模板
+	AnnotationKeyJupyter                 = "crater.raids.io/jupyter-token" // Jupyter token cache
+	AnnotationKeyWebIDE                  = "crater.raids.io/webide-token"  // WebIDE token cache
+	AnnotationKeyAlertEnabled            = "crater.raids.io/alert-enabled" // 是否开启告警
+	AnnotationKeySSHEnabled              = "crater.raids.io/ssh-enabled"   // SSH 缓存，格式为 "ip:port"
+	AnnotationKeyUserID                  = "crater.raids.io/user-id"
+	AnnotationKeyForwards                = "crater.raids.io/forwards"
+	AnnotationKeyScheduleType            = vcjobservice.AnnotationKeyScheduleType
+	AnnotationKeyWaitingToleranceSeconds = vcjobservice.AnnotationKeyWaitingToleranceSeconds
 
 	// VolumeData  = "crater-rw-workspace"
 	VolumeCache = "crater-cache"
@@ -143,16 +167,59 @@ type (
 	}
 )
 
+type ForwardType = vcjobservice.ForwardType
+
+const (
+	IngressType  = vcjobservice.IngressType
+	NodePortType = vcjobservice.NodePortType
+)
+
+type Forward = vcjobservice.Forward
+
+func (mgr *VolcanojobMgr) checkBillingBeforeCreate(
+	c *gin.Context,
+	userID uint,
+	accountID uint,
+	scheduleType model.ScheduleType,
+) error {
+	if mgr.billingService == nil {
+		return nil
+	}
+	return mgr.billingService.OnJobCreateCheck(c.Request.Context(), userID, accountID, &scheduleType)
+}
+
+func (mgr *VolcanojobMgr) preCheckCreateJob(
+	c *gin.Context,
+	token util.JWTMessage,
+	scheduleType model.ScheduleType,
+	requireInteractiveLimit bool,
+) bool {
+	if err := mgr.checkBillingBeforeCreate(c, token.UserID, token.AccountID, scheduleType); err != nil {
+		resputil.Error(c, err.Error(), resputil.BusinessLogicError)
+		return false
+	}
+	if requireInteractiveLimit {
+		if err := aitaskctl.CheckInteractiveLimitBeforeCreate(c, token.UserID, token.AccountID); err != nil {
+			resputil.Error(c, err.Error(), resputil.ServiceError)
+			return false
+		}
+	}
+	exceededResources, err := aitaskctl.CheckResourcesBeforeCreateJob(c, token.UserID, token.AccountID)
+	if err != nil {
+		resputil.Error(c, err.Error(), resputil.ServiceError)
+		return false
+	}
+	if len(exceededResources) > 0 {
+		resputil.Error(c, fmt.Sprintf("%v", exceededResources), resputil.NotSpecified)
+		return false
+	}
+	return true
+}
+
 type (
 	DatasetMount struct {
 		DatasetID uint   `json:"datasetID"`
 		MountPath string `json:"mountPath"`
-	}
-
-	Forward struct {
-		Type ForwardType `json:"type"`
-		Name string      `json:"name"`
-		Port int32       `json:"port"`
 	}
 
 	CreateJobCommon struct {
@@ -165,8 +232,64 @@ type (
 		AlertEnabled      bool                         `json:"alertEnabled"`
 		CpuPinningEnabled bool                         `json:"cpuPinningEnabled"`
 		Forwards          []Forward                    `json:"forwards,omitempty"`
+		ScheduleType      *model.ScheduleType          `json:"scheduleType,omitempty"`
 	}
 )
+
+func (req *CreateJobCommon) validateScheduleOptions(allowBackfill bool) (model.ScheduleType, error) {
+	scheduleType := model.ScheduleTypeNormal
+	if req.ScheduleType != nil {
+		scheduleType = *req.ScheduleType
+	}
+
+	switch scheduleType {
+	case model.ScheduleTypeNormal, model.ScheduleTypeBackfill:
+	default:
+		return model.ScheduleTypeNormal, fmt.Errorf(
+			"scheduleType must be %d or %d",
+			model.ScheduleTypeBackfill,
+			model.ScheduleTypeNormal,
+		)
+	}
+	if scheduleType == model.ScheduleTypeBackfill && !allowBackfill {
+		return model.ScheduleTypeNormal, fmt.Errorf(
+			"backfill scheduleType is only supported for jupyter, webide, and custom training jobs",
+		)
+	}
+
+	req.ScheduleType = ptr.To(scheduleType)
+	return scheduleType, nil
+}
+
+type jobScheduleMetadata struct {
+	ScheduleType            model.ScheduleType
+	WaitingToleranceSeconds *int64
+}
+
+func (mgr *VolcanojobMgr) resolveJobScheduleMetadata(
+	ctx context.Context,
+	scheduleType model.ScheduleType,
+) (*jobScheduleMetadata, error) {
+	if mgr.configService == nil {
+		return nil, fmt.Errorf("config service is not initialized")
+	}
+
+	cfg, err := mgr.configService.GetPrequeueConfig(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if scheduleType == model.ScheduleTypeBackfill {
+		if !cfg.BackfillEnabled {
+			return nil, fmt.Errorf("backfill scheduleType is disabled by prequeue configuration")
+		}
+		return &jobScheduleMetadata{ScheduleType: scheduleType}, nil
+	}
+	waitingToleranceSeconds := cfg.NormalJobWaitingToleranceSeconds
+	return &jobScheduleMetadata{
+		ScheduleType:            scheduleType,
+		WaitingToleranceSeconds: &waitingToleranceSeconds,
+	}, nil
+}
 
 // DeleteJob godoc
 //
@@ -262,13 +385,13 @@ func (mgr *VolcanojobMgr) getDeleteJobRecord(c *gin.Context, jobName string) (*m
 	return getJob(c, jobName, &token)
 }
 
-func (mgr *VolcanojobMgr) buildDeleteJobPlan(c *gin.Context, jobName string) (*deleteJobPlan, error) {
+func (mgr *VolcanojobMgr) buildDeleteJobPlan(c *gin.Context, jobRecord *model.Job) (*deleteJobPlan, error) {
 	clusterJob := &batch.Job{}
 	namespace := config.GetConfig().Namespaces.Job
-	if err := mgr.client.Get(c, client.ObjectKey{Name: jobName, Namespace: namespace}, clusterJob); err != nil {
+	if err := mgr.client.Get(c, client.ObjectKey{Name: jobRecord.JobName, Namespace: namespace}, clusterJob); err != nil {
 		if errors.IsNotFound(err) {
 			return &deleteJobPlan{
-				shouldDeleteRecord: true,
+				shouldDeleteRecord: jobRecord.Status != model.Prequeue,
 				shouldDeleteJob:    false,
 				clusterJob:         nil,
 			}, nil
@@ -290,16 +413,29 @@ func (mgr *VolcanojobMgr) buildDeleteJobPlan(c *gin.Context, jobName string) (*d
 	}, nil
 }
 
-func (mgr *VolcanojobMgr) applyDeleteJobPlan(c *gin.Context, jobName string, plan *deleteJobPlan) error {
+func (mgr *VolcanojobMgr) applyDeleteJobPlan(c *gin.Context, record *model.Job, plan *deleteJobPlan) error {
 	j := query.Job
 	if plan.shouldDeleteRecord {
-		_, err := j.WithContext(c).Where(j.JobName.Eq(jobName)).Delete()
+		if err := mgr.settleJobBeforeDelete(c, record, plan.clusterJob); err != nil {
+			return err
+		}
+		_, err := j.WithContext(c).Where(j.JobName.Eq(record.JobName)).Delete()
 		return err
 	}
 
-	_, err := j.WithContext(c).Where(j.JobName.Eq(jobName)).Updates(model.Job{
+	completedAt := time.Now()
+	if mgr.billingService != nil {
+		finalJob := *record
+		finalJob.Status = model.Deleted
+		finalJob.CompletedTimestamp = completedAt
+		if err := mgr.billingService.OnJobFinishedSettlement(c.Request.Context(), &finalJob); err != nil {
+			return err
+		}
+	}
+
+	_, err := j.WithContext(c).Where(j.JobName.Eq(record.JobName)).Updates(model.Job{
 		Status:             model.Deleted,
-		CompletedTimestamp: time.Now(),
+		CompletedTimestamp: completedAt,
 	})
 	return err
 }
@@ -332,14 +468,14 @@ func (mgr *VolcanojobMgr) deleteJob(c *gin.Context, recordAdminOperation bool) {
 		return
 	}
 
-	plan, err := mgr.buildDeleteJobPlan(c, req.JobName)
+	plan, err := mgr.buildDeleteJobPlan(c, jobRecord)
 	if err != nil {
 		recordDeleteJobOperation(constants.OpStatusFailed, err.Error(), jobRecord, nil)
 		resputil.Error(c, err.Error(), resputil.NotSpecified)
 		return
 	}
 
-	if err := mgr.applyDeleteJobPlan(c, req.JobName, plan); err != nil {
+	if err := mgr.applyDeleteJobPlan(c, jobRecord, plan); err != nil {
 		recordDeleteJobOperation(constants.OpStatusFailed, err.Error(), jobRecord, nil)
 		resputil.Error(c, err.Error(), resputil.NotSpecified)
 		return
@@ -359,6 +495,34 @@ func (mgr *VolcanojobMgr) deleteJob(c *gin.Context, recordAdminOperation bool) {
 	)
 
 	resputil.Success(c, nil)
+	mgr.notifyDeletedPrequeue(plan.shouldDeleteRecord)
+}
+
+func (mgr *VolcanojobMgr) notifyDeletedPrequeue(shouldDeleteRecord bool) {
+	if !shouldDeleteRecord || mgr.prequeueWatcher == nil {
+		return
+	}
+	mgr.prequeueWatcher.RequestFullScan()
+}
+
+func (mgr *VolcanojobMgr) settleJobBeforeDelete(c *gin.Context, record *model.Job, job *batch.Job) error {
+	if mgr.billingService == nil || record == nil {
+		return nil
+	}
+
+	finalJob := *record
+	finalJob.CompletedTimestamp = resolveDeleteSettlementTime(record, job)
+	return mgr.billingService.OnJobFinishedSettlement(c.Request.Context(), &finalJob)
+}
+
+func resolveDeleteSettlementTime(record *model.Job, job *batch.Job) time.Time {
+	if record != nil && !record.CompletedTimestamp.IsZero() {
+		return record.CompletedTimestamp
+	}
+	if job != nil && !job.Status.State.LastTransitionTime.IsZero() {
+		return job.Status.State.LastTransitionTime.Time
+	}
+	return time.Now()
 }
 
 // AdminDeleteJob godoc
@@ -400,21 +564,29 @@ type GetJobLogResp struct {
 
 type (
 	JobResp struct {
-		Name               string          `json:"name"`
-		JobName            string          `json:"jobName"`
-		Owner              string          `json:"owner"`
-		UserInfo           model.UserInfo  `json:"userInfo"`
-		JobType            string          `json:"jobType"`
-		Queue              string          `json:"queue"`
-		Status             string          `json:"status"`
-		CreationTimestamp  metav1.Time     `json:"createdAt"`
-		RunningTimestamp   metav1.Time     `json:"startedAt"`
-		CompletedTimestamp metav1.Time     `json:"completedAt"`
-		Nodes              []string        `json:"nodes"`
-		Resources          v1.ResourceList `json:"resources"`
-		Locked             bool            `json:"locked"`
-		PermanentLocked    bool            `json:"permanentLocked"`
-		LockedTimestamp    metav1.Time     `json:"lockedTimestamp"`
+		Name                    string             `json:"name"`
+		JobName                 string             `json:"jobName"`
+		Owner                   string             `json:"owner"`
+		UserInfo                model.UserInfo     `json:"userInfo"`
+		JobType                 string             `json:"jobType"`
+		ScheduleType            model.ScheduleType `json:"scheduleType"`
+		WaitingToleranceSeconds *int64             `json:"waitingToleranceSeconds,omitempty"`
+		Queue                   string             `json:"queue"`
+		Status                  string             `json:"status"`
+		CreationTimestamp       metav1.Time        `json:"createdAt"`
+		RunningTimestamp        metav1.Time        `json:"startedAt"`
+		CompletedTimestamp      metav1.Time        `json:"completedAt"`
+		Nodes                   []string           `json:"nodes"`
+		Resources               v1.ResourceList    `json:"resources"`
+		Locked                  bool               `json:"locked"`
+		PermanentLocked         bool               `json:"permanentLocked"`
+		LockedTimestamp         metav1.Time        `json:"lockedTimestamp"`
+	}
+
+	JobBillingResp struct {
+		JobName           string  `json:"jobName"`
+		Name              string  `json:"name"`
+		BilledPointsTotal float64 `json:"billedPointsTotal"`
 	}
 )
 
@@ -499,6 +671,110 @@ func (mgr *VolcanojobMgr) GetAllJobsInDays(c *gin.Context) {
 	resputil.Success(c, jobList)
 }
 
+func convertJobBillingResp(jobs []*model.Job) []JobBillingResp {
+	jobList := make([]JobBillingResp, len(jobs))
+	for i := range jobs {
+		jobList[i] = JobBillingResp{
+			JobName:           jobs[i].JobName,
+			Name:              jobs[i].Name,
+			BilledPointsTotal: service.ToDisplayPoints(jobs[i].BilledPointsTotal),
+		}
+	}
+	return jobList
+}
+
+func (mgr *VolcanojobMgr) GetSelfJobBilling(c *gin.Context) {
+	if mgr.billingService == nil || !mgr.billingService.IsUserFacingEnabled(c.Request.Context()) {
+		resputil.Success(c, []JobBillingResp{})
+		return
+	}
+	token := util.GetToken(c)
+	j := query.Job
+	jobs, err := j.WithContext(c).
+		Where(j.UserID.Eq(token.UserID), j.AccountID.Eq(token.AccountID)).
+		Find()
+	if err != nil {
+		resputil.Error(c, err.Error(), resputil.NotSpecified)
+		return
+	}
+	resputil.Success(c, convertJobBillingResp(jobs))
+}
+
+func (mgr *VolcanojobMgr) GetAllJobBillingInDays(c *gin.Context) {
+	type QueryParams struct {
+		Days int `form:"days"`
+	}
+
+	var req QueryParams
+	if err := c.ShouldBindQuery(&req); err != nil {
+		resputil.BadRequestError(c, err.Error())
+		return
+	}
+
+	days := 7
+	if req.Days > 0 {
+		days = req.Days
+	}
+
+	j := query.Job
+	q := j.WithContext(c)
+	if req.Days != -1 {
+		now := time.Now()
+		lookbackPeriod := now.AddDate(0, 0, -days)
+		q = q.Where(j.CreatedAt.Gte(lookbackPeriod))
+	}
+	jobs, err := q.Find()
+	if err != nil {
+		resputil.Error(c, err.Error(), resputil.NotSpecified)
+		return
+	}
+	resputil.Success(c, convertJobBillingResp(jobs))
+}
+
+func (mgr *VolcanojobMgr) GetUserJobBillingInDays(c *gin.Context) {
+	username := c.Param("username")
+	if username == "" {
+		resputil.BadRequestError(c, "username is required")
+		return
+	}
+
+	type QueryParams struct {
+		Days int `form:"days"`
+	}
+
+	var req QueryParams
+	if err := c.ShouldBindQuery(&req); err != nil {
+		resputil.BadRequestError(c, err.Error())
+		return
+	}
+
+	days := 30
+	if req.Days > 0 {
+		days = req.Days
+	}
+
+	u := query.User
+	targetUser, err := u.WithContext(c).Where(u.Name.Eq(username)).First()
+	if err != nil {
+		resputil.Error(c, "User not found", resputil.NotSpecified)
+		return
+	}
+
+	j := query.Job
+	q := j.WithContext(c).Where(j.UserID.Eq(targetUser.ID))
+	if req.Days != -1 {
+		now := time.Now()
+		lookbackPeriod := now.AddDate(0, 0, -days)
+		q = q.Where(j.CreatedAt.Gte(lookbackPeriod))
+	}
+	jobs, err := q.Find()
+	if err != nil {
+		resputil.Error(c, err.Error(), resputil.NotSpecified)
+		return
+	}
+	resputil.Success(c, convertJobBillingResp(jobs))
+}
+
 // GetUserJobsInDays godoc
 //
 //	@Summary		Get jobs of a specific user within days
@@ -577,6 +853,10 @@ func convertJobResp(jobs []*model.Job) []JobResp {
 	jobList := make([]JobResp, len(jobs))
 	for i := range jobs {
 		job := jobs[i]
+		scheduleType := model.ScheduleTypeNormal
+		if job.ScheduleType != nil {
+			scheduleType = *job.ScheduleType
+		}
 		jobList[i] = JobResp{
 			Name:    job.Name,
 			JobName: job.JobName,
@@ -585,17 +865,19 @@ func convertJobResp(jobs []*model.Job) []JobResp {
 				Username: job.User.Name,
 				Nickname: job.User.Nickname,
 			},
-			JobType:            string(job.JobType),
-			Queue:              job.Account.Nickname,
-			Status:             string(job.Status),
-			CreationTimestamp:  metav1.NewTime(job.CreationTimestamp),
-			RunningTimestamp:   metav1.NewTime(job.RunningTimestamp),
-			CompletedTimestamp: metav1.NewTime(job.CompletedTimestamp),
-			Nodes:              job.Nodes.Data(),
-			Resources:          job.Resources.Data(),
-			Locked:             job.LockedTimestamp.After(utils.GetLocalTime()),
-			PermanentLocked:    utils.IsPermanentTime(job.LockedTimestamp),
-			LockedTimestamp:    metav1.NewTime(job.LockedTimestamp),
+			JobType:                 string(job.JobType),
+			ScheduleType:            scheduleType,
+			WaitingToleranceSeconds: job.WaitingToleranceSeconds,
+			Queue:                   job.Account.Nickname, // 向后兼容，保持展示账号昵称
+			Status:                  string(job.Status),
+			CreationTimestamp:       metav1.NewTime(job.CreationTimestamp),
+			RunningTimestamp:        metav1.NewTime(job.RunningTimestamp),
+			CompletedTimestamp:      metav1.NewTime(job.CompletedTimestamp),
+			Nodes:                   job.Nodes.Data(),
+			Resources:               job.Resources.Data(),
+			Locked:                  job.LockedTimestamp.After(utils.GetLocalTime()),
+			PermanentLocked:         utils.IsPermanentTime(job.LockedTimestamp),
+			LockedTimestamp:         metav1.NewTime(job.LockedTimestamp),
 		}
 	}
 	sort.Slice(jobList, func(i, j int) bool {
@@ -606,23 +888,25 @@ func convertJobResp(jobs []*model.Job) []JobResp {
 
 type (
 	JobDetailResp struct {
-		Name               string                        `json:"name"`
-		Namespace          string                        `json:"namespace"`
-		Username           string                        `json:"username"`
-		Nickname           string                        `json:"nickname"`
-		UserInfo           model.UserInfo                `json:"userInfo"`
-		JobName            string                        `json:"jobName"`
-		JobType            model.JobType                 `json:"jobType"`
-		Queue              string                        `json:"queue"`
-		Resources          v1.ResourceList               `json:"resources"`
-		Status             batch.JobPhase                `json:"status"`
-		ProfileData        *monitor.ProfileData          `json:"profileData"`
-		ScheduleData       *model.ScheduleData           `json:"scheduleData"`
-		Events             []v1.Event                    `json:"events"`
-		TerminatedStates   []v1.ContainerStateTerminated `json:"terminatedStates"`
-		CreationTimestamp  metav1.Time                   `json:"createdAt"`
-		RunningTimestamp   metav1.Time                   `json:"startedAt"`
-		CompletedTimestamp metav1.Time                   `json:"completedAt"`
+		Name                    string                        `json:"name"`
+		Namespace               string                        `json:"namespace"`
+		Username                string                        `json:"username"`
+		Nickname                string                        `json:"nickname"`
+		UserInfo                model.UserInfo                `json:"userInfo"`
+		JobName                 string                        `json:"jobName"`
+		JobType                 model.JobType                 `json:"jobType"`
+		ScheduleType            model.ScheduleType            `json:"scheduleType"`
+		WaitingToleranceSeconds *int64                        `json:"waitingToleranceSeconds,omitempty"`
+		Queue                   string                        `json:"queue"`
+		Resources               v1.ResourceList               `json:"resources"`
+		Status                  batch.JobPhase                `json:"status"`
+		ProfileData             *monitor.ProfileData          `json:"profileData"`
+		ScheduleData            *model.ScheduleData           `json:"scheduleData"`
+		Events                  []v1.Event                    `json:"events"`
+		TerminatedStates        []v1.ContainerStateTerminated `json:"terminatedStates"`
+		CreationTimestamp       metav1.Time                   `json:"createdAt"`
+		RunningTimestamp        metav1.Time                   `json:"startedAt"`
+		CompletedTimestamp      metav1.Time                   `json:"completedAt"`
 	}
 
 	// SSHPortData 定义 SSH 端口信息的结构体
@@ -703,7 +987,10 @@ func (mgr *VolcanojobMgr) GetJobDetail(c *gin.Context) {
 	if job.TerminatedStates != nil {
 		terminatedStates = job.TerminatedStates.Data()
 	}
-
+	scheduleType := model.ScheduleTypeNormal
+	if job.ScheduleType != nil {
+		scheduleType = *job.ScheduleType
+	}
 	jobDetail := JobDetailResp{
 		Name:      job.Name,
 		Namespace: job.Attributes.Data().Namespace,
@@ -713,20 +1000,47 @@ func (mgr *VolcanojobMgr) GetJobDetail(c *gin.Context) {
 			Username: job.User.Name,
 			Nickname: job.User.Nickname,
 		},
-		JobName:            job.JobName,
-		JobType:            job.JobType,
-		Queue:              job.Account.Nickname,
-		Status:             job.Status,
-		Resources:          job.Resources.Data(),
-		ProfileData:        profileData,
-		ScheduleData:       scheduleData,
-		Events:             events,
-		TerminatedStates:   terminatedStates,
-		CreationTimestamp:  metav1.NewTime(job.CreationTimestamp),
-		RunningTimestamp:   metav1.NewTime(job.RunningTimestamp),
-		CompletedTimestamp: metav1.NewTime(job.CompletedTimestamp),
+		JobName:                 job.JobName,
+		JobType:                 job.JobType,
+		ScheduleType:            scheduleType,
+		WaitingToleranceSeconds: job.WaitingToleranceSeconds,
+		Queue:                   job.Account.Nickname,
+		Status:                  job.Status,
+		Resources:               job.Resources.Data(),
+		ProfileData:             profileData,
+		ScheduleData:            scheduleData,
+		Events:                  events,
+		TerminatedStates:        terminatedStates,
+		CreationTimestamp:       metav1.NewTime(job.CreationTimestamp),
+		RunningTimestamp:        metav1.NewTime(job.RunningTimestamp),
+		CompletedTimestamp:      metav1.NewTime(job.CompletedTimestamp),
 	}
 	resputil.Success(c, jobDetail)
+}
+
+func (mgr *VolcanojobMgr) GetJobBillingDetail(c *gin.Context) {
+	if mgr.billingService == nil || !mgr.billingService.IsUserFacingEnabled(c.Request.Context()) {
+		resputil.Success(c, JobBillingResp{})
+		return
+	}
+	var req JobActionReq
+	if err := c.ShouldBindUri(&req); err != nil {
+		resputil.BadRequestError(c, err.Error())
+		return
+	}
+
+	token := util.GetToken(c)
+	job, err := getJob(c, req.JobName, &token)
+	if err != nil {
+		resputil.Error(c, err.Error(), resputil.NotSpecified)
+		return
+	}
+
+	resputil.Success(c, JobBillingResp{
+		JobName:           job.JobName,
+		Name:              job.Name,
+		BilledPointsTotal: service.ToDisplayPoints(job.BilledPointsTotal),
+	})
 }
 
 // OpenSSH godoc
@@ -775,7 +1089,6 @@ func (mgr *VolcanojobMgr) OpenSSH(c *gin.Context) {
 	// get container name
 	containerName := pod.Spec.Containers[0].Name
 
-	// 1. Check if AnnotationKeySSHEnabled is already set, get the value and return
 	if v, ok := pod.Annotations[AnnotationKeySSHEnabled]; ok {
 		// 解析主机名和端口号 // Value 格式为 "ip:port"
 		splits := strings.Split(v, ":")
@@ -810,7 +1123,6 @@ func (mgr *VolcanojobMgr) OpenSSH(c *gin.Context) {
 		return
 	}
 
-	// 3. Create service for SSH
 	ip, port, err := mgr.serviceManager.CreateNodePort(
 		c,
 		[]metav1.OwnerReference{
@@ -836,7 +1148,6 @@ func (mgr *VolcanojobMgr) OpenSSH(c *gin.Context) {
 		return
 	}
 
-	// 4. Update the pod annotation with the SSH information
 	sshInfo := SSHInfo{
 		IP:   ip,
 		Port: fmt.Sprintf("%d", port),

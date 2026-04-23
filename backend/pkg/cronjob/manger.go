@@ -29,6 +29,7 @@ func NewCronJobManager(
 	promClient monitor.PrometheusInterface,
 	gpuAnalysisService patrol.GpuAnalysisServiceInterface,
 	adminOpsReportService patrol.AdminOpsReportServiceInterface,
+	billingService patrol.BillingServiceInterface,
 ) *CronJobManager {
 	return &CronJobManager{
 		Client:     cli,
@@ -45,6 +46,7 @@ func NewCronJobManager(
 			PromClient:         promClient,
 			GpuAnalysisService: gpuAnalysisService,
 			AdminOpsService:    adminOpsReportService,
+			BillingService:     billingService,
 		},
 		cron: cron.New(cron.WithLocation(time.Local)),
 	}

@@ -3,12 +3,14 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"gorm.io/datatypes"
+	"gorm.io/gorm"
 	"k8s.io/klog/v2"
 	batch "volcano.sh/apis/pkg/apis/batch/v1alpha1"
 
@@ -18,6 +20,10 @@ import (
 	"github.com/raids-lab/crater/internal/service"
 	"github.com/raids-lab/crater/internal/util"
 	"github.com/raids-lab/crater/pkg/utils"
+)
+
+var errBackfillJobExtensionApprovalOrderUnsupported = errors.New(
+	"backfill jobs cannot create extension approval orders",
 )
 
 //nolint:gochecknoinits // This is the standard way to register a gin handler.
@@ -353,6 +359,25 @@ func (mgr *ApprovalOrderMgr) CreateApprovalOrder(c *gin.Context) {
 	if token.UserID == 0 {
 		resputil.Error(c, "cannot get user id", resputil.NotSpecified)
 		return
+	}
+
+	if req.Type == model.ApprovalOrderTypeJob {
+		jobDB := query.Job
+		job, err := jobDB.WithContext(c).Where(jobDB.JobName.Eq(req.Name)).First()
+		if err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				resputil.BadRequestError(c, "job not found")
+				return
+			}
+			klog.Errorf("failed to query job for approval order, userID: %d, jobName: %s, err: %v",
+				token.UserID, req.Name, err)
+			resputil.Error(c, "failed to query target job", resputil.NotSpecified)
+			return
+		}
+		if err := validateJobApprovalOrderCreation(job); err != nil {
+			resputil.BadRequestError(c, err.Error())
+			return
+		}
 	}
 
 	// 2. 检查是否满足自动审批条件（简单规则，同步执行）
@@ -918,6 +943,14 @@ func convertToApprovalOrderResp(order *model.ApprovalOrder) ApprovalOrderResp {
 	}
 
 	return resp
+}
+
+func validateJobApprovalOrderCreation(job *model.Job) error {
+	if job.ScheduleType != nil && *job.ScheduleType == model.ScheduleTypeBackfill {
+		return errBackfillJobExtensionApprovalOrderUnsupported
+	}
+
+	return nil
 }
 
 // checkAutoApprovalEligibility 检查是否满足自动审批条件

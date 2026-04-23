@@ -1,13 +1,22 @@
 package handler
 
 import (
+	"fmt"
+	"time"
+
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
+	"k8s.io/klog/v2"
 
 	"strings"
+
+	"github.com/raids-lab/crater/dao/query"
 
 	"github.com/raids-lab/crater/internal/resputil"
 	"github.com/raids-lab/crater/internal/service"
 	"github.com/raids-lab/crater/pkg/cronjob"
+	"github.com/raids-lab/crater/pkg/prequeuewatcher"
 )
 
 //nolint:gochecknoinits // This is the standard way to register a gin handler.
@@ -18,20 +27,26 @@ func init() {
 type SystemConfigMgr struct {
 	name           string
 	service        *service.ConfigService
+	billingService *service.BillingService
 	cronjobManager *cronjob.CronJobManager
+	watcher        *prequeuewatcher.PrequeueWatcher
 }
 
 func NewSystemConfigMgr(conf *RegisterConfig) Manager {
 	return &SystemConfigMgr{
 		name:           "system-config",
 		service:        conf.ConfigService,
+		billingService: conf.BillingService,
 		cronjobManager: conf.CronJobManager,
+		watcher:        conf.PrequeueWatcher,
 	}
 }
 
-func (mgr *SystemConfigMgr) GetName() string                      { return mgr.name }
-func (mgr *SystemConfigMgr) RegisterPublic(_ *gin.RouterGroup)    {}
-func (mgr *SystemConfigMgr) RegisterProtected(_ *gin.RouterGroup) {}
+func (mgr *SystemConfigMgr) GetName() string                   { return mgr.name }
+func (mgr *SystemConfigMgr) RegisterPublic(_ *gin.RouterGroup) {}
+func (mgr *SystemConfigMgr) RegisterProtected(g *gin.RouterGroup) {
+	g.GET("/billing", mgr.GetBillingStatus)
+}
 
 func (mgr *SystemConfigMgr) RegisterAdmin(g *gin.RouterGroup) {
 	// 路由组: /v1/admin/system-config
@@ -42,6 +57,14 @@ func (mgr *SystemConfigMgr) RegisterAdmin(g *gin.RouterGroup) {
 
 	g.GET("/gpu-analysis", mgr.GetGpuAnalysisStatus)
 	g.PUT("/gpu-analysis", mgr.SetGpuAnalysisStatus)
+	g.GET("/prequeue", mgr.GetPrequeueConfig)
+	g.PUT("/prequeue", mgr.UpdatePrequeueConfig)
+
+	g.GET("/billing", mgr.GetBillingStatus)
+	g.PUT("/billing", mgr.SetBillingStatus)
+	g.POST("/billing/reconcile", mgr.TriggerBillingBaseLoop)
+	g.POST("/billing/reset-all", mgr.ResetAllBillingBalances)
+	g.POST("/billing/extra-balance-all", mgr.GrantAllUsersExtraBalance)
 }
 
 // --- DTOs ---
@@ -65,6 +88,66 @@ type GpuAnalysisStatusResp struct {
 
 type SetGpuAnalysisStatusReq struct {
 	Enable bool `json:"enable"`
+}
+
+type PrequeueConfigResp struct {
+	BackfillEnabled                  bool  `json:"backfillEnabled"`
+	QueueQuotaEnabled                bool  `json:"queueQuotaEnabled"`
+	NormalJobWaitingToleranceSeconds int64 `json:"normalJobWaitingToleranceSeconds"`
+	ActivateTickerIntervalSeconds    int64 `json:"activateTickerIntervalSeconds"`
+	MaxTotalActivationsPerRound      int64 `json:"maxTotalActivationsPerRound"`
+}
+
+type UpdatePrequeueConfigReq struct {
+	BackfillEnabled                  *bool  `json:"backfillEnabled" binding:"required"`
+	QueueQuotaEnabled                *bool  `json:"queueQuotaEnabled" binding:"required"`
+	NormalJobWaitingToleranceSeconds *int64 `json:"normalJobWaitingToleranceSeconds" binding:"required,gt=0"`
+	ActivateTickerIntervalSeconds    *int64 `json:"activateTickerIntervalSeconds" binding:"required,gt=0"`
+	MaxTotalActivationsPerRound      *int64 `json:"maxTotalActivationsPerRound" binding:"required,gt=0"`
+}
+
+type BillingStatusResp struct {
+	FeatureEnabled                    bool    `json:"featureEnabled"`
+	Active                            bool    `json:"active"`
+	RunningSettlementEnabled          bool    `json:"runningSettlementEnabled"`
+	RunningSettlementIntervalMinutes  int     `json:"runningSettlementIntervalMinutes"`
+	JobFreeMinutes                    int     `json:"jobFreeMinutes"`
+	DefaultIssueAmount                float64 `json:"defaultIssueAmount"`
+	DefaultIssuePeriodMinutes         int     `json:"defaultIssuePeriodMinutes"`
+	AccountIssueAmountOverrideEnabled bool    `json:"accountIssueAmountOverrideEnabled"`
+	AccountIssuePeriodOverrideEnabled bool    `json:"accountIssuePeriodOverrideEnabled"`
+	BaseLoopCronStatus                string  `json:"baseLoopCronStatus"`
+	BaseLoopCronEnabled               bool    `json:"baseLoopCronEnabled"`
+}
+
+type SetBillingStatusReq struct {
+	FeatureEnabled                    *bool                       `json:"featureEnabled"`
+	Active                            *bool                       `json:"active"`
+	RunningSettlementEnabled          *bool                       `json:"runningSettlementEnabled"`
+	RunningSettlementIntervalMinutes  *int                        `json:"runningSettlementIntervalMinutes"`
+	JobFreeMinutes                    *int                        `json:"jobFreeMinutes"`
+	DefaultIssueAmount                *service.BillingAmountInput `json:"defaultIssueAmount"`
+	DefaultIssuePeriodMinutes         *int                        `json:"defaultIssuePeriodMinutes"`
+	AccountIssueAmountOverrideEnabled *bool                       `json:"accountIssueAmountOverrideEnabled"`
+	AccountIssuePeriodOverrideEnabled *bool                       `json:"accountIssuePeriodOverrideEnabled"`
+}
+
+type ResetAllBillingBalancesResp struct {
+	AccountsAffected     int       `json:"accountsAffected"`
+	UserAccountsAffected int       `json:"userAccountsAffected"`
+	IssuedAt             time.Time `json:"issuedAt"`
+}
+
+type GrantAllUsersExtraBalanceReq struct {
+	Delta  service.BillingAmountInput `json:"delta" binding:"required"`
+	Reason string                     `json:"reason"`
+}
+
+type GrantAllUsersExtraBalanceResp struct {
+	UsersAffected int       `json:"usersAffected"`
+	Delta         float64   `json:"delta"`
+	Reason        string    `json:"reason"`
+	IssuedAt      time.Time `json:"issuedAt"`
 }
 
 // --- Handlers ---
@@ -199,4 +282,222 @@ func (mgr *SystemConfigMgr) SetGpuAnalysisStatus(c *gin.Context) {
 		action = "enabled"
 	}
 	resputil.Success(c, "GPU analysis "+action)
+}
+
+// GetPrequeueConfig godoc
+// @Summary		获取新版排队配置
+// @Description	获取当前回填提交开关、Crater 队内资源配额开关、普通作业等待忍耐时间和 watcher 运行参数
+// @Tags			SystemConfig
+// @Produce		json
+// @Security		Bearer
+// @Success		200		{object}	resputil.Response[PrequeueConfigResp] "配置"
+// @Failure		500		{object}	resputil.Response[any] "服务器错误"
+// @Router			/v1/admin/system-config/prequeue [get]
+func (mgr *SystemConfigMgr) GetPrequeueConfig(c *gin.Context) {
+	cfg, err := mgr.service.GetPrequeueConfig(c.Request.Context())
+	if err != nil {
+		resputil.Error(c, err.Error(), resputil.ServiceError)
+		return
+	}
+
+	resputil.Success(c, PrequeueConfigResp{
+		BackfillEnabled:                  cfg.BackfillEnabled,
+		QueueQuotaEnabled:                cfg.QueueQuotaEnabled,
+		NormalJobWaitingToleranceSeconds: cfg.NormalJobWaitingToleranceSeconds,
+		ActivateTickerIntervalSeconds:    cfg.ActivateTickerIntervalSeconds,
+		MaxTotalActivationsPerRound:      cfg.MaxTotalActivationsPerRound,
+	})
+}
+
+// UpdatePrequeueConfig godoc
+// @Summary		更新新版排队配置
+// @Description	更新回填提交开关、Crater 队内资源配额开关、普通作业等待忍耐时间和 watcher 运行参数
+// @Tags			SystemConfig
+// @Accept			json
+// @Produce		json
+// @Security		Bearer
+// @Param			data	body		UpdatePrequeueConfigReq	true	"配置"
+// @Success		200		{object}	resputil.Response[string] "更新成功"
+// @Failure		400		{object}	resputil.Response[any] "参数错误"
+// @Failure		500		{object}	resputil.Response[any] "服务器错误"
+// @Router			/v1/admin/system-config/prequeue [put]
+func (mgr *SystemConfigMgr) UpdatePrequeueConfig(c *gin.Context) {
+	var req UpdatePrequeueConfigReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		resputil.BadRequestError(c, err.Error())
+		return
+	}
+
+	cfg := &service.PrequeueRuntimeConfig{
+		BackfillEnabled:                  *req.BackfillEnabled,
+		QueueQuotaEnabled:                *req.QueueQuotaEnabled,
+		NormalJobWaitingToleranceSeconds: *req.NormalJobWaitingToleranceSeconds,
+		ActivateTickerIntervalSeconds:    *req.ActivateTickerIntervalSeconds,
+		MaxTotalActivationsPerRound:      *req.MaxTotalActivationsPerRound,
+	}
+	if err := mgr.service.UpdatePrequeueConfig(c.Request.Context(), cfg); err != nil {
+		if strings.Contains(err.Error(), "must be greater than 0") {
+			resputil.BadRequestError(c, err.Error())
+			return
+		}
+		resputil.Error(c, err.Error(), resputil.ServiceError)
+		return
+	}
+	if mgr.watcher != nil {
+		mgr.watcher.RequestFullScan()
+	}
+
+	resputil.Success(c, "Prequeue configuration updated successfully")
+}
+
+func (mgr *SystemConfigMgr) GetBillingStatus(c *gin.Context) {
+	if mgr.billingService == nil {
+		resputil.Error(c, "billing service is not initialized", resputil.ServiceError)
+		return
+	}
+	status := mgr.billingService.GetStatus(c.Request.Context())
+	if !status.FeatureEnabled {
+		resputil.Success(c, BillingStatusResp{
+			FeatureEnabled:      false,
+			BaseLoopCronStatus:  status.BaseLoopCronStatus,
+			BaseLoopCronEnabled: status.BaseLoopCronEnabled,
+		})
+		return
+	}
+	resputil.Success(c, BillingStatusResp{
+		FeatureEnabled:                    status.FeatureEnabled,
+		Active:                            status.Active,
+		RunningSettlementEnabled:          status.RunningSettlementEnabled,
+		RunningSettlementIntervalMinutes:  status.RunningSettlementIntervalMinutes,
+		JobFreeMinutes:                    status.JobFreeMinutes,
+		DefaultIssueAmount:                status.DefaultIssueAmount,
+		DefaultIssuePeriodMinutes:         status.DefaultIssuePeriodMinutes,
+		AccountIssueAmountOverrideEnabled: status.AccountIssueAmountOverrideEnabled,
+		AccountIssuePeriodOverrideEnabled: status.AccountIssuePeriodOverrideEnabled,
+		BaseLoopCronStatus:                status.BaseLoopCronStatus,
+		BaseLoopCronEnabled:               status.BaseLoopCronEnabled,
+	})
+}
+
+func (mgr *SystemConfigMgr) SetBillingStatus(c *gin.Context) {
+	if mgr.billingService == nil {
+		resputil.Error(c, "billing service is not initialized", resputil.ServiceError)
+		return
+	}
+	var req SetBillingStatusReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		resputil.BadRequestError(c, err.Error())
+		return
+	}
+	var defaultIssueAmount *int64
+	if req.DefaultIssueAmount != nil {
+		v := req.DefaultIssueAmount.MicroPoints()
+		defaultIssueAmount = &v
+	}
+	if err := mgr.billingService.UpdateStatus(c.Request.Context(), service.BillingUpdate{
+		FeatureEnabled:                    req.FeatureEnabled,
+		Active:                            req.Active,
+		RunningSettlementEnabled:          req.RunningSettlementEnabled,
+		RunningSettlementIntervalMinutes:  req.RunningSettlementIntervalMinutes,
+		JobFreeMinutes:                    req.JobFreeMinutes,
+		DefaultIssueAmount:                defaultIssueAmount,
+		DefaultIssuePeriodMinutes:         req.DefaultIssuePeriodMinutes,
+		AccountIssueAmountOverrideEnabled: req.AccountIssueAmountOverrideEnabled,
+		AccountIssuePeriodOverrideEnabled: req.AccountIssuePeriodOverrideEnabled,
+	}); err != nil {
+		resputil.Error(c, err.Error(), resputil.BusinessLogicError)
+		return
+	}
+	resputil.Success(c, "Billing configuration updated")
+}
+
+func (mgr *SystemConfigMgr) TriggerBillingBaseLoop(c *gin.Context) {
+	if mgr.billingService == nil {
+		resputil.Error(c, "billing service is not initialized", resputil.ServiceError)
+		return
+	}
+	result, err := mgr.billingService.RunBaseLoopOnce(c.Request.Context())
+	if err != nil {
+		resputil.Error(c, err.Error(), resputil.ServiceError)
+		return
+	}
+	resputil.Success(c, result)
+}
+
+func (mgr *SystemConfigMgr) ResetAllBillingBalances(c *gin.Context) {
+	if mgr.billingService == nil {
+		resputil.Error(c, "billing service is not initialized", resputil.ServiceError)
+		return
+	}
+	if !mgr.billingService.IsFeatureEnabled(c.Request.Context()) {
+		resputil.Error(c, "billing feature is disabled", resputil.BusinessLogicError)
+		return
+	}
+	result, err := mgr.billingService.ResetAllPeriodFreeBalances(c.Request.Context())
+	if err != nil {
+		resputil.Error(c, err.Error(), resputil.ServiceError)
+		return
+	}
+	resputil.Success(c, ResetAllBillingBalancesResp{
+		AccountsAffected:     result.AccountsAffected,
+		UserAccountsAffected: result.UserAccountsAffected,
+		IssuedAt:             result.IssuedAt,
+	})
+}
+
+func (mgr *SystemConfigMgr) GrantAllUsersExtraBalance(c *gin.Context) {
+	var req GrantAllUsersExtraBalanceReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		resputil.BadRequestError(c, err.Error())
+		return
+	}
+	delta := req.Delta.MicroPoints()
+	if delta <= 0 {
+		resputil.BadRequestError(c, "delta must be > 0")
+		return
+	}
+
+	issuedAt := time.Now()
+	usersAffected := 0
+	err := query.GetDB().WithContext(c).Transaction(func(tx *gorm.DB) error {
+		txQuery := query.Use(tx)
+		u := txQuery.User
+		users, err := u.WithContext(c).
+			Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where(u.DeletedAt.IsNull()).
+			Find()
+		if err != nil {
+			return err
+		}
+
+		for i := range users {
+			user := users[i]
+			after := user.ExtraBalance + delta
+			if _, err := u.WithContext(c).
+				Where(u.ID.Eq(user.ID), u.DeletedAt.IsNull()).
+				Update(u.ExtraBalance, after); err != nil {
+				return err
+			}
+			usersAffected++
+		}
+		return nil
+	})
+	if err != nil {
+		resputil.Error(c, fmt.Sprintf("grant extra balance to all users failed: %v", err), resputil.NotSpecified)
+		return
+	}
+
+	klog.Infof(
+		"grant extra balance to all users success, usersAffected=%d delta=%d reason=%s",
+		usersAffected,
+		delta,
+		req.Reason,
+	)
+
+	resputil.Success(c, GrantAllUsersExtraBalanceResp{
+		UsersAffected: usersAffected,
+		Delta:         service.ToDisplayPoints(delta),
+		Reason:        req.Reason,
+		IssuedAt:      issuedAt,
+	})
 }

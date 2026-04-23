@@ -19,7 +19,6 @@ import { createFileRoute, useRouter } from '@tanstack/react-router'
 import { t } from 'i18next'
 import { useAtomValue } from 'jotai'
 import { LayoutGridIcon } from 'lucide-react'
-import { CirclePlus } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { useForm } from 'react-hook-form'
 import { toast } from 'sonner'
@@ -37,7 +36,6 @@ import {
 } from '@/components/ui/form'
 import { Input } from '@/components/ui/input'
 
-import LoadableButton from '@/components/button/loadable-button'
 import { VolumeMountsCard } from '@/components/form/data-mount-form-field'
 import { EnvFormCard } from '@/components/form/env-form-field'
 import FormExportButton from '@/components/form/form-export-button'
@@ -49,11 +47,15 @@ import { OtherOptionsFormCard } from '@/components/form/other-options-form-field
 import { ResourceFormFields } from '@/components/form/resource-form-field'
 import { TemplateInfo } from '@/components/form/template-info'
 import { MetadataFormJupyterEmias } from '@/components/form/types'
+import { CreateBillingBlockDialog } from '@/components/job/create-billing-block-dialog'
+import { JobSubmitButton } from '@/components/job/job-submit-button'
 import { PublishConfigForm, publishValidateSearch } from '@/components/job/publish'
 import CardTitle from '@/components/label/card-title'
 import PageTitle from '@/components/layout/page-title'
 
 import { JobType, apiJobTemplate, apiJupyterCreate } from '@/services/api/vcjob'
+
+import { useJobCreateBillingBlockDialog } from '@/hooks/use-job-create-billing-block'
 
 import {
   VolumeMountType,
@@ -69,6 +71,7 @@ import {
   volumeMountsSchema,
 } from '@/utils/form'
 import { atomUserInfo } from '@/utils/store'
+import { showErrorToast } from '@/utils/toast'
 
 export const Route = createFileRoute('/portal/jobs/new/emias-jupyter-job')({
   validateSearch: publishValidateSearch,
@@ -137,6 +140,8 @@ function RouteComponent() {
   const router = useRouter()
   const queryClient = useQueryClient()
   const user = useAtomValue(atomUserInfo)
+  const { billingBlockDialogOpen, setBillingBlockDialogOpen, handleJobCreateError } =
+    useJobCreateBillingBlockDialog()
 
   const { mutate: createTask, isPending } = useMutation({
     mutationFn: (values: FormSchema) => {
@@ -168,6 +173,12 @@ function RouteComponent() {
       ])
       toast.success(`作业 ${jobName} 创建成功`)
       router.history.back()
+    },
+    onError: (error) => {
+      if (handleJobCreateError(error)) {
+        return
+      }
+      showErrorToast(error)
     },
   })
 
@@ -261,6 +272,10 @@ function RouteComponent() {
 
   return (
     <>
+      <CreateBillingBlockDialog
+        open={billingBlockDialogOpen}
+        onOpenChange={setBillingBlockDialogOpen}
+      />
       <Form {...form}>
         <form
           onSubmit={form.handleSubmit(onSubmit)}
@@ -292,10 +307,7 @@ function RouteComponent() {
                 configform={form}
                 fromTemplate={searchParams.fromTemplate}
               />
-              <LoadableButton isLoading={isPending} isLoadingText="提交作业" type="submit">
-                <CirclePlus className="size-4" />
-                提交作业
-              </LoadableButton>
+              <JobSubmitButton isLoading={isPending} />
             </div>
           </PageTitle>
           <div className="flex flex-col gap-4 md:gap-6 lg:col-span-2">

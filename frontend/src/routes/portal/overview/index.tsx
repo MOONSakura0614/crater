@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-import { useQuery } from '@tanstack/react-query'
+import { UseQueryResult, useQuery } from '@tanstack/react-query'
 import { createFileRoute } from '@tanstack/react-router'
 import { ColumnDef } from '@tanstack/react-table'
 import { type Locale, enUS, ja, ko, zhCN } from 'date-fns/locale'
@@ -26,12 +26,16 @@ import JobPhaseLabel, { getJobPhaseLabel, jobPhases } from '@/components/badge/j
 import JobTypeLabel, { jobTypes } from '@/components/badge/job-type-badge'
 import NodeBadges from '@/components/badge/node-badges'
 import ResourceBadges from '@/components/badge/resource-badges'
+import ScheduleTypeLabel from '@/components/badge/schedule-type-badge'
 import DocsButton from '@/components/button/docs-button'
 import NivoPie from '@/components/chart/nivo-pie'
 import PieCard from '@/components/chart/pie-card'
+import { BillingPointsBadge } from '@/components/custom/billing-points-badge'
+import { BillingSummaryCards } from '@/components/custom/billing-summary-cards'
 import { TimeDistance } from '@/components/custom/time-distance'
 import ListedNewJobButton from '@/components/job/new-job-button'
 import { getHeader } from '@/components/job/overview/admin-jobs'
+import { scheduleTypes } from '@/components/job/statuses'
 import UserLabel from '@/components/label/user-label'
 import PageTitle from '@/components/layout/page-title'
 import { SectionCards } from '@/components/metrics/section-cards'
@@ -41,11 +45,21 @@ import { DataTable } from '@/components/query-table'
 import { DataTableColumnHeader } from '@/components/query-table/column-header'
 import { DataTableToolbarConfig } from '@/components/query-table/toolbar'
 
-import { JobPhase } from '@/services/api/vcjob'
-import { IJobInfo, JobType, apiJobAllList } from '@/services/api/vcjob'
+import { apiJobAllBillingList } from '@/services/api/billing'
+import { apiContextBillingSummary } from '@/services/api/context'
+import { apiGetBillingStatus } from '@/services/api/system-config'
+import {
+  IJobInfo,
+  JobPhase,
+  JobType,
+  ScheduleType,
+  apiJobAllList,
+  getUnifiedJobPhase,
+} from '@/services/api/vcjob'
 import { queryNodes } from '@/services/query/node'
 import { queryResources } from '@/services/query/resource'
 
+import { isBillingVisibleForUser } from '@/utils/billing-visibility'
 import { getUserPseudonym } from '@/utils/pseudonym'
 import { atomUserInfo, globalHideUsername } from '@/utils/store'
 
@@ -67,20 +81,32 @@ const toolbarConfig: DataTableToolbarConfig = {
       option: jobTypes,
     },
     {
+      key: 'scheduleType',
+      title: getHeader('scheduleType'),
+      option: scheduleTypes,
+    },
+    {
       key: 'status',
       title: '状态',
       option: jobPhases,
-      defaultValues: ['Running', 'Pending'],
+      defaultValues: ['Running', 'Pending', 'Prequeue'],
     },
   ],
   getHeader: getHeader,
 }
 
+type JobTableRow = IJobInfo & { billedPointsTotal?: number }
+
 function Overview() {
-  const { i18n } = useTranslation()
+  const { i18n, t } = useTranslation()
   const userInfo = useAtomValue(atomUserInfo)
   const nodeQuery = useQuery(queryNodes(true))
   const { getNicknameByName } = useAccountNameLookup()
+  const { data: billingStatus } = useQuery({
+    queryKey: ['system-config', 'billing-status'],
+    queryFn: () => apiGetBillingStatus().then((res) => res.data),
+  })
+  const billingVisible = isBillingVisibleForUser(billingStatus)
 
   // 获取当前语言对应的 date-fns locale
   const getDateLocale = useCallback((): Locale => {
@@ -96,7 +122,7 @@ function Overview() {
     }
   }, [i18n.language])
 
-  const jobColumns = useMemo<ColumnDef<IJobInfo>[]>(
+  const jobColumns = useMemo<ColumnDef<JobTableRow>[]>(
     () => [
       {
         accessorKey: 'jobType',
@@ -104,6 +130,17 @@ function Overview() {
           <DataTableColumnHeader column={column} title={getHeader('jobType')} />
         ),
         cell: ({ row }) => <JobTypeLabel jobType={row.getValue<JobType>('jobType')} />,
+      },
+      {
+        accessorFn: (row) => String(row.scheduleType ?? ScheduleType.Normal),
+        id: 'scheduleType',
+        header: ({ column }) => (
+          <DataTableColumnHeader column={column} title={getHeader('scheduleType')} />
+        ),
+        cell: ({ row }) => <ScheduleTypeLabel scheduleType={row.original.scheduleType} />,
+        filterFn: (row, id, value) => {
+          return (value as string[]).includes(row.getValue(id))
+        },
       },
       {
         accessorKey: 'queue',
@@ -154,8 +191,18 @@ function Overview() {
           return 0
         },
       },
+      ...(billingVisible
+        ? [
+            {
+              accessorKey: 'billedPointsTotal',
+              header: ({ column }) => <DataTableColumnHeader column={column} title="累计点数" />,
+              cell: ({ row }) => <BillingPointsBadge value={row.original.billedPointsTotal ?? 0} />,
+            } as ColumnDef<JobTableRow>,
+          ]
+        : []),
       {
-        accessorKey: 'status',
+        accessorFn: (row) => getUnifiedJobPhase(row.status),
+        id: 'status',
         header: ({ column }) => (
           <DataTableColumnHeader column={column} title={getHeader('status')} />
         ),
@@ -197,7 +244,7 @@ function Overview() {
         sortingFn: 'datetime',
       },
     ],
-    []
+    [billingVisible]
   )
 
   const jobQuery = useQuery({
@@ -206,12 +253,53 @@ function Overview() {
     select: (res) => res.data,
     refetchInterval: REFETCH_INTERVAL,
   })
+  const jobBillingQuery = useQuery({
+    queryKey: ['overview', 'joblist', 'billing'],
+    queryFn: () => apiJobAllBillingList(),
+    select: (res) =>
+      res.data.reduce<Record<string, number>>((acc, item) => {
+        acc[item.jobName] = item.billedPointsTotal
+        return acc
+      }, {}),
+    refetchInterval: REFETCH_INTERVAL,
+    enabled: billingVisible,
+  })
+  const mergedJobQuery = useMemo(
+    () =>
+      ({
+        data: (jobQuery.data ?? []).map((job) => ({
+          ...job,
+          billedPointsTotal: jobBillingQuery.data?.[job.jobName] ?? 0,
+        })),
+        isLoading: jobQuery.isLoading || (billingVisible && jobBillingQuery.isLoading),
+        dataUpdatedAt: Math.max(
+          jobQuery.dataUpdatedAt,
+          billingVisible ? jobBillingQuery.dataUpdatedAt : 0
+        ),
+        refetch: jobQuery.refetch,
+      }) as unknown as UseQueryResult<JobTableRow[], Error>,
+    [
+      billingVisible,
+      jobBillingQuery.data,
+      jobBillingQuery.dataUpdatedAt,
+      jobBillingQuery.isLoading,
+      jobQuery.data,
+      jobQuery.dataUpdatedAt,
+      jobQuery.isLoading,
+      jobQuery.refetch,
+    ]
+  )
 
   const resourcesQuery = useQuery(
     queryResources(true, (resource) => {
       return resource.type == 'gpu'
     })
   )
+  const billingSummaryQuery = useQuery({
+    queryKey: ['context', 'billing-summary', 'overview'],
+    queryFn: () => apiContextBillingSummary().then((res) => res.data),
+    enabled: billingVisible,
+  })
 
   const jobStatus = useMemo(() => {
     if (!jobQuery.data) {
@@ -321,7 +409,15 @@ function Overview() {
           description="使用异构集群管理平台 Crater 加速您的科研工作"
           className="lg:col-span-2"
         >
-          <div className="flex flex-row gap-3">
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            {billingVisible ? (
+              <BillingSummaryCards
+                summary={billingSummaryQuery.data}
+                emphasis="inline"
+                compact
+                className="shrink-0"
+              />
+            ) : null}
             <DocsButton title="平台文档" url="" />
             <ListedNewJobButton mode="all" />
           </div>
@@ -336,10 +432,12 @@ function Overview() {
               icon: FlaskConicalIcon,
             },
             {
-              title: '等待中作业',
-              value: jobQuery.data?.filter((job) => job.status === JobPhase.Pending).length,
+              title: t('statuses.waiting'),
+              value:
+                jobQuery.data?.filter((job) => getUnifiedJobPhase(job.status) === JobPhase.Pending)
+                  .length ?? 0,
               className: 'text-highlight-purple',
-              description: '等待调度或未就绪的作业数量',
+              description: t('jobs.statuses.pending.description'),
               icon: ClockIcon,
             },
             {
@@ -357,7 +455,7 @@ function Overview() {
               icon: GpuIcon,
             },
           ]}
-          className="lg:col-span-2"
+          className="lg:col-span-2 @5xl/main:grid-cols-5"
         />
         <PieCard
           icon={FlaskConicalIcon}
@@ -389,7 +487,7 @@ function Overview() {
           description: '查看近 7 天集群作业的运行情况',
         }}
         storageKey="overview_joblist"
-        query={jobQuery}
+        query={mergedJobQuery}
         columns={jobColumns}
         toolbarConfig={toolbarConfig}
       />

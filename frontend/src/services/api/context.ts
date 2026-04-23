@@ -41,13 +41,59 @@ export interface QuotaResp {
   gpus: ResourceResp[]
 }
 
+export interface BillingSummaryResp {
+  periodFreeBalance: number
+  extraBalance: number
+  totalAvailable: number
+  lastIssuedAt?: string
+  nextIssueAt?: string
+  effectiveIssueAmount: number
+  effectiveIssuePeriodMinutes: number
+}
+
+export interface JobResourceSummaryUsage {
+  used: string
+  running: string
+  pending: string
+  limit?: string
+}
+
+export interface JobResourceSummaryAccelerator {
+  resource: string
+  used: string
+  running: string
+  pending: string
+  limit?: string
+}
+
+export interface JobResourceSummaryResp {
+  runningJobs: number
+  pendingJobs: number
+  cpu: JobResourceSummaryUsage
+  memory: JobResourceSummaryUsage
+  accelerators: JobResourceSummaryAccelerator[]
+}
+
+export interface PrequeueFeatureStatusResp {
+  backfillEnabled: boolean
+}
+
 const store = getDefaultStore()
 const { scheduler } = store.get(globalSettings)
+
+export const apiContextPrequeueStatus = () =>
+  apiV1Get<IResponse<PrequeueFeatureStatusResp>>('context/prequeue')
 
 export const apiContextQuota = () => {
   const url = scheduler === 'volcano' ? 'context/quota' : 'aijobs/quota'
   return apiV1Get<IResponse<QuotaResp>>(url)
 }
+
+export const apiContextBillingSummary = () =>
+  apiV1Get<IResponse<BillingSummaryResp>>('context/billing/summary')
+
+export const apiContextJobResourceSummary = () =>
+  apiV1Get<IResponse<JobResourceSummaryResp>>('context/job-resource-summary')
 
 export const apiContextUpdateUserAttributes = (data: IUserAttributes) =>
   apiV1Put<IResponse<string>>('context/attributes', data)

@@ -20,6 +20,8 @@ const (
 	TRIGGER_ADMIN_OPS_REPORT_JOB = "trigger-admin-ops-report-job"
 	// 存储专项巡检任务
 	TRIGGER_STORAGE_DAILY_AUDIT_JOB = "trigger-storage-daily-audit-job"
+	// Billing 基础循环
+	TRIGGER_BILLING_BASE_LOOP_JOB = "biling-base-loop"
 	// 未来可以扩展其他巡检任务，例如：
 	// CHECK_NODE_HEALTH = "check-node-health"
 )
@@ -49,6 +51,10 @@ type TriggerStorageAuditRequest struct {
 	DryRun   bool `json:"dry_run,omitempty"`
 }
 
+type BillingServiceInterface interface {
+	RunBaseLoopOnce(ctx context.Context) (any, error)
+}
+
 // Clients 包含巡检任务所需的客户端
 type Clients struct {
 	Client             client.Client
@@ -56,6 +62,7 @@ type Clients struct {
 	PromClient         monitor.PrometheusInterface
 	GpuAnalysisService GpuAnalysisServiceInterface
 	AdminOpsService    AdminOpsReportServiceInterface
+	BillingService     BillingServiceInterface
 }
 
 func NewPatrolClients(
@@ -63,12 +70,16 @@ func NewPatrolClients(
 	kubeClient kubernetes.Interface,
 	promClient monitor.PrometheusInterface,
 	gpuAnalysisService GpuAnalysisServiceInterface,
+	adminOpsReportService AdminOpsReportServiceInterface,
+	billingService BillingServiceInterface,
 ) *Clients {
 	return &Clients{
 		Client:             cli,
 		KubeClient:         kubeClient,
 		PromClient:         promClient,
 		GpuAnalysisService: gpuAnalysisService,
+		AdminOpsService:    adminOpsReportService,
+		BillingService:     billingService,
 	}
 }
 
@@ -140,6 +151,10 @@ func GetPatrolFunc(jobName string, clients *Clients, jobConfig datatypes.JSON) (
 		}
 		f = func(ctx context.Context) (any, error) {
 			return RunTriggerStorageAudit(ctx, clients, req)
+		}
+	case TRIGGER_BILLING_BASE_LOOP_JOB:
+		f = func(ctx context.Context) (any, error) {
+			return RunTriggerBillingBaseLoop(ctx, clients)
 		}
 
 	default:

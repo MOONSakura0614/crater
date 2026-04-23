@@ -63,7 +63,10 @@ func (s *agentJobSubmitter) SubmitJupyterJob(
 	if err := aitaskctl.CheckInteractiveLimitBeforeCreate(ctx, token.UserID, token.AccountID); err != nil {
 		return nil, fmt.Errorf("interactive job limit reached: %v", err)
 	}
-	exceededResources := aitaskctl.CheckResourcesBeforeCreateJob(ctx, token.UserID, token.AccountID)
+	exceededResources, err := aitaskctl.CheckResourcesBeforeCreateJob(ctx, token.UserID, token.AccountID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to check resources: %w", err)
+	}
 	if len(exceededResources) > 0 {
 		return nil, fmt.Errorf("resource quota exceeded: %v", exceededResources)
 	}
@@ -95,7 +98,7 @@ func (s *agentJobSubmitter) SubmitJupyterJob(
 	}
 
 	labels, jobAnnotations, podAnnotations := getLabelAndAnnotations(
-		CraterJobTypeJupyter, token, baseURL, req.Name, req.Template, req.AlertEnabled,
+		CraterJobTypeJupyter, token, baseURL, &req.CreateJobCommon, nil,
 	)
 
 	podSpec, err := generateInteractivePodSpec(
@@ -182,7 +185,10 @@ func (s *agentJobSubmitter) SubmitTrainingJob(
 		return nil, fmt.Errorf("invalid training request: %w", err)
 	}
 
-	exceededResources := aitaskctl.CheckResourcesBeforeCreateJob(ctx, token.UserID, token.AccountID)
+	exceededResources, err := aitaskctl.CheckResourcesBeforeCreateJob(ctx, token.UserID, token.AccountID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to check resources: %w", err)
+	}
 	if len(exceededResources) > 0 {
 		return nil, fmt.Errorf("resource quota exceeded: %v", exceededResources)
 	}
@@ -202,7 +208,7 @@ func (s *agentJobSubmitter) SubmitTrainingJob(
 	baseURL := jobName[3:]
 
 	labels, jobAnnotations, podAnnotations := getLabelAndAnnotations(
-		CraterJobTypeCustom, token, baseURL, req.Name, req.Template, req.AlertEnabled,
+		CraterJobTypeCustom, token, baseURL, &req.CreateJobCommon, nil,
 	)
 
 	podSpec, err := GenerateCustomPodSpec(ctx, token, &req)

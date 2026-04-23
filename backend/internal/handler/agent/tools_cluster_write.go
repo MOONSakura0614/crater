@@ -103,7 +103,7 @@ func (mgr *AgentMgr) toolCordonNode(c *gin.Context, token util.JWTMessage, rawAr
 			"message":        "node is already unschedulable",
 		}, nil
 	}
-	if err := mgr.nodeClient.UpdateNodeunschedule(c, nodeName, strings.TrimSpace(args.Reason), token.Username); err != nil {
+	if _, err := mgr.nodeClient.UpdateNodeunschedule(c, nodeName, strings.TrimSpace(args.Reason), token.Username); err != nil {
 		return nil, fmt.Errorf("failed to cordon node %s: %w", nodeName, err)
 	}
 	return map[string]any{
@@ -140,7 +140,7 @@ func (mgr *AgentMgr) toolUncordonNode(c *gin.Context, token util.JWTMessage, raw
 			"message":        "node is already schedulable",
 		}, nil
 	}
-	if err := mgr.nodeClient.UpdateNodeunschedule(c, nodeName, strings.TrimSpace(args.Reason), token.Username); err != nil {
+	if _, err := mgr.nodeClient.UpdateNodeunschedule(c, nodeName, strings.TrimSpace(args.Reason), token.Username); err != nil {
 		return nil, fmt.Errorf("failed to uncordon node %s: %w", nodeName, err)
 	}
 	return map[string]any{
