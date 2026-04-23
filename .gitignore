@@ -101,3 +101,5 @@ crater-agent/test_openai.py
 
 # Codex CLI artifacts
 .codex
+# Thesis drafts (personal work, not code)
+docs/thesis/
