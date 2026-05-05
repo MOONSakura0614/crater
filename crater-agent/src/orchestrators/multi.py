@@ -1051,41 +1051,40 @@ def _relevant_read_tools_for_request(
     if _followup_needs_tool_resolution(user_message):
         add("get_job_detail", "get_job_events", "get_job_logs", "diagnose_job", "list_user_jobs")
 
+    # NOTE: Keyword-driven tool injection is intentionally narrow. We only fire
+    # when the trigger phrase is unambiguous (multi-character, scenario-specific).
+    # Short tokens like "节点"/"gpu"/"指标"/"配置" used to fire here but biased
+    # the Coordinator toward over-recommending tools — we now leave those to
+    # Planner/Explorer's own LLM judgement based on the full tool catalog.
     if any(token in normalized for token in ("我的作业", "作业列表", "哪些作业", "失败作业", "最近作业", "最新作业", "job list")):
         add("list_user_jobs", "get_health_overview")
 
-    if any(token in normalized for token in ("日志", "事件", "详情", "状态", "指标", "metrics", "metric", "gpu 利用", "显存", "吞吐")):
-        add("get_job_detail", "get_job_events", "get_job_logs", "query_job_metrics", "prometheus_query")
-
-    if any(token in normalized for token in ("镜像", "image", "cuda", "pytorch", "tensorflow", "deepspeed")):
+    if any(token in normalized for token in ("镜像列表", "可用镜像", "list image", "recommend image")):
         add("list_available_images", "recommend_training_images")
 
     if any(token in normalized for token in ("配额", "quota", "能不能提交", "能否提交", "可不可以提交")):
         add("check_quota")
 
-    if any(token in normalized for token in ("配置", "模板", "资源", "gpu", "a100", "v100", "分布式", "提交配置", "完整配置")):
+    # Scenario-specific bundle: only fire on full-phrase triggers, not single chars
+    if any(token in normalized for token in ("提交配置", "完整配置", "完整提交配置", "8 张", "8卡", "8 卡", "分布式训练")):
         add(
             "get_job_templates",
             "get_resource_recommendation",
-            "get_realtime_capacity",
-            "list_available_gpu_models",
             "list_available_images",
             "check_quota",
         )
 
-    if any(token in normalized for token in ("节点", "node", "集群", "cluster", "容量", "空闲", "排队", "queue")):
+    # Cluster-wide health: only fire on explicit cluster phrasing
+    if any(token in normalized for token in ("集群健康", "cluster health", "整体健康", "巡检")):
         add(
             "get_cluster_health_report",
             "get_cluster_health_overview",
-            "list_cluster_nodes",
-            "list_cluster_jobs",
-            "get_node_detail",
-            "k8s_list_nodes",
-            "analyze_queue_status",
-            "get_realtime_capacity",
         )
 
-    if any(token in normalized for token in ("rollout", "deployment", "statefulset", "pod", "service", "endpoint", "k8s", "kubernetes")):
+    if any(token in normalized for token in ("排队", "queue", "为什么他", "公平", "优先级")):
+        add("analyze_queue_status")
+
+    if any(token in normalized for token in ("rollout", "deployment", "statefulset", "kubernetes 工作负载")):
         add(
             "k8s_rollout_status",
             "k8s_list_pods",
@@ -1567,7 +1566,10 @@ def _build_coordinator_decision_context(
         },
         "missing_facts": missing_facts,
         "over_exploration_warnings": repeated_warnings,
-        "recommended_next_stage_hint": recommended_next,
+        # NOTE: recommended_next_stage_hint intentionally not exposed to LLM —
+        # let Coordinator decide based on missing_facts and progress instead.
+        # The internal fallback uses recommended_next when the LLM call fails.
+        "_internal_fallback_stage": recommended_next,
         "toolless_finalize_allowed": bool(toolless_finalize_reason),
         "toolless_finalize_reason": toolless_finalize_reason,
         "history_followup_with_context": history_followup_with_context,
@@ -1586,7 +1588,7 @@ def _fallback_stage_from_decision_context(
     routing: RoutingDecision,
     decision_context: dict[str, Any],
 ) -> str:
-    hint = str(decision_context.get("recommended_next_stage_hint") or "").strip().lower()
+    hint = str(decision_context.get("_internal_fallback_stage") or "").strip().lower()
     if hint not in {"observe", "act", "verify", "replan", "finalize", "plan"}:
         hint = _fallback_stage_from_state(state, routing)
 
@@ -1778,6 +1780,41 @@ def _needs_companion_noschedule_taint(
     return has_label and not has_taint
 
 
+_TAINT_KEY_HINTS: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("rdma",), "rdma"),
+    (("nvidia", "gpu", "显卡", "驱动"), "gpu"),
+    (("network", "网络", "网卡"), "network"),
+    (("disk", "磁盘", "存储"), "disk"),
+    (("maintenance", "维护"), "maintenance"),
+)
+
+
+def _label_action_key_value(state: MASState) -> tuple[str, str] | None:
+    """Recover the label key/value from a pending k8s_label_node action.
+
+    The companion taint should mirror the label so the audit story stays
+    consistent. Falls back to None if the label payload isn't available.
+    """
+    for action in state.actions:
+        if action.tool_name != "k8s_label_node":
+            continue
+        args = getattr(action, "tool_args", None) or {}
+        key = str(args.get("key") or "").strip()
+        value = str(args.get("value") or "").strip()
+        if key:
+            return key, value or "true"
+    return None
+
+
+def _infer_taint_key_from_message(user_message: str) -> tuple[str, str]:
+    """Pick a taint key/value from message tokens, defaulting to a neutral pair."""
+    normalized = str(user_message or "").lower()
+    for tokens, key in _TAINT_KEY_HINTS:
+        if any(token in normalized for token in tokens):
+            return key, "degraded"
+    return "isolation", "noschedule"
+
+
 def _companion_noschedule_taint_action(
     *,
     user_message: str,
@@ -1797,12 +1834,17 @@ def _companion_noschedule_taint_action(
     )
     if not node_name:
         return None
+    label_pair = _label_action_key_value(state)
+    if label_pair is not None:
+        key, value = label_pair
+    else:
+        key, value = _infer_taint_key_from_message(user_message)
     return {
         "tool_name": "k8s_taint_node",
         "tool_args": {
             "node_name": node_name,
-            "key": "rdma",
-            "value": "degraded",
+            "key": key,
+            "value": value,
             "effect": "NoSchedule",
         },
         "title": f"给节点 {node_name} 添加 NoSchedule taint",
@@ -2284,14 +2326,10 @@ def _determine_verifier_gate(
             "write_intent_without_action_result",
         )
 
-    if state.observation and state.observation.open_questions:
-        return VerifierGateDecision(
-            False,
-            "observe" if state.loop_round < state.runtime_config.lead_max_rounds else "finalize",
-            "read_only_missing_evidence",
-        )
-
-    return VerifierGateDecision(False, "finalize", "read_only_sufficient_evidence")
+    # NOTE: read-only override branches removed — Coordinator's prompt already
+    # tells it that read-only investigation should usually finalize rather than
+    # verify. If Coordinator still chose verify here, run it (cheap insurance).
+    return VerifierGateDecision(True, "verify", "coordinator_requested_verify")
 
 
 def _latest_controller_stage(state: MASState) -> str:
@@ -3102,6 +3140,539 @@ def _derive_runtime_scenario_from_routing(routing: RoutingDecision) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Tool execution + role tool-loop (module-level for testability/readability)
+# ---------------------------------------------------------------------------
+#
+# These two functions used to be deeply nested closures inside
+# `MultiAgentOrchestrator.stream()` (~415 combined lines). They are pure in
+# the sense that they take all dependencies explicitly — state, request,
+# tool executor, and the SSE `emit` callable — instead of reaching into a
+# parent scope. The thin wrappers in `stream()` adapt the closure-based
+# call sites to these explicit signatures without changing behavior.
+
+EmitCallable = Callable[[str, dict[str, Any]], Awaitable[dict[str, Any]]]
+CallToolCallable = Callable[..., Awaitable[tuple[dict[str, Any], list[dict[str, Any]]]]]
+
+
+async def _call_tool_with_events(
+    *,
+    tool_executor: ToolExecutorProtocol,
+    state: MASState,
+    request: Any,
+    emit: EmitCallable,
+    role_agent_id: str,
+    role_name: str,
+    tool_name: str,
+    tool_args: dict[str, Any],
+    tool_call_id: str,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Execute a tool, update usage counters, and return result + SSE events.
+
+    Permission checks, latency measurement, and confirmation-required handling
+    all stay together — this is one logical unit. Extracted from the original
+    ``stream().call_tool`` closure so it no longer depends on lexical capture.
+    """
+    if not is_tool_allowed_for_role(role_name, tool_name):
+        logger.warning("Tool '%s' not allowed for role '%s', skipping", tool_name, role_name)
+        result: dict[str, Any] = {
+            "status": "error",
+            "message": f"Tool '{tool_name}' is not allowed for role '{role_name}'",
+        }
+        return result, [
+            await emit(
+                "tool_call_completed",
+                {
+                    "agentId": role_agent_id,
+                    "agentRole": role_name,
+                    "toolCallId": tool_call_id,
+                    "toolName": tool_name,
+                    "toolArgs": tool_args,
+                    "result": result["message"],
+                    "resultSummary": result["message"],
+                    "status": "error",
+                    "isError": True,
+                },
+            )
+        ]
+
+    events: list[dict[str, Any]] = [
+        await emit(
+            "tool_call_started",
+            {
+                "agentId": role_agent_id,
+                "agentRole": role_name,
+                "toolCallId": tool_call_id,
+                "toolName": tool_name,
+                "toolArgs": tool_args,
+                "status": "executing",
+            },
+        )
+    ]
+    state.usage_summary.tool_calls += 1
+    if tool_name in READ_ONLY_TOOL_NAMES:
+        state.usage_summary.read_tool_calls += 1
+    else:
+        state.usage_summary.write_tool_calls += 1
+    tool_started_at = time.perf_counter()
+    result = await tool_executor.execute(
+        tool_name=tool_name,
+        tool_args=tool_args,
+        session_id=request.session_id,
+        user_id=int(
+            (dict(getattr(request, "context", None) or {}).get("actor") or {}).get("user_id") or 0
+        ),
+        turn_id=request.turn_id,
+        tool_call_id=tool_call_id,
+        agent_id=role_agent_id,
+        agent_role=role_name,
+        actor_role=state.goal.actor_role,
+    )
+    measured_tool_latency_ms = max(1, int((time.perf_counter() - tool_started_at) * 1000))
+    if not isinstance(result, dict):
+        result = {"status": "error", "message": str(result)}
+    if not result.get("_latency_ms"):
+        result["_latency_ms"] = measured_tool_latency_ms
+    state.usage_summary.tool_latency_ms += int(result.get("_latency_ms") or 0)
+    if result.get("status") == "confirmation_required":
+        confirmation = result.get("confirmation", {})
+        events.append(
+            await emit(
+                "tool_call_confirmation_required",
+                {
+                    "agentId": role_agent_id,
+                    "agentRole": role_name,
+                    "toolCallId": tool_call_id,
+                    "confirmId": confirmation.get("confirm_id", ""),
+                    "action": confirmation.get("tool_name", tool_name),
+                    "description": confirmation.get("description", ""),
+                    "interaction": confirmation.get("interaction", "approval"),
+                    "form": confirmation.get("form"),
+                    "status": "awaiting_confirmation",
+                    "latencyMs": result.get("_latency_ms", 0),
+                },
+            )
+        )
+        return result, events
+
+    events.append(
+        await emit(
+            "tool_call_completed",
+            {
+                "agentId": role_agent_id,
+                "agentRole": role_name,
+                "toolCallId": tool_call_id,
+                "toolName": tool_name,
+                "toolArgs": tool_args,
+                "result": result.get("result", result.get("message", "")),
+                "resultSummary": str(result.get("result", result.get("message", "")))[:500],
+                "status": "error" if result.get("status") == "error" else "done",
+                "isError": result.get("status") == "error",
+                "latencyMs": result.get("_latency_ms", 0),
+            },
+        )
+    )
+    report_payload = build_pipeline_report_payload(tool_name, result)
+    if report_payload:
+        events.append(await emit("pipeline_report", report_payload))
+    return result, events
+
+
+async def _execute_read_tool_pairs_impl(
+    *,
+    pairs: list[tuple[str, dict[str, Any]]],
+    role_agent: Any,
+    prefix: str,
+    limit: int | None,
+    state: MASState,
+    post_action_check_tool_baseline: int | None,
+    call_tool: CallToolCallable,
+) -> tuple[int, list[dict[str, Any]]]:
+    """Execute a sequence of read-only tools with dedup and Prometheus-skip.
+
+    Used by stages that have a precomputed set of read tools to run (typically
+    Planner-driven). Mirrors the dedup logic in ``_run_role_tool_loop_impl``
+    so behavior is consistent whether tools come from a tool_loop LLM or a
+    pre-baked list.
+    """
+    executed = 0
+    emitted_events: list[dict[str, Any]] = []
+    max_pairs = max(0, int(limit if limit is not None else len(pairs)))
+    duplicate_baseline = (
+        post_action_check_tool_baseline
+        if _has_terminal_write_result(state)
+        else None
+    )
+    settled_prometheus_families = _settled_prometheus_families(
+        state,
+        baseline=duplicate_baseline,
+    )
+    for index, (tool_name, tool_args) in enumerate(pairs[:max_pairs], start=1):
+        if tool_name not in READ_ONLY_TOOL_NAMES:
+            continue
+        if tool_name == "prometheus_query":
+            family = _prometheus_query_family(tool_args)
+            if family and family in settled_prometheus_families:
+                continue
+        if _has_equivalent_tool_evidence(
+            state,
+            tool_name=tool_name,
+            tool_args=tool_args,
+            baseline=duplicate_baseline,
+        ):
+            continue
+        signature = _tool_signature(tool_name, tool_args)
+        if signature in state.attempted_tool_signatures:
+            continue
+        state.attempted_tool_signatures.append(signature)
+        result, tool_events = await call_tool(
+            role_agent_id=role_agent.agent_id,
+            role_name=role_agent.role,
+            tool_name=tool_name,
+            tool_args=tool_args,
+            tool_call_id=f"{role_agent.agent_id}-{prefix}-{state.loop_round}-{index}",
+        )
+        emitted_events.extend(tool_events)
+        state.remember_tool(
+            agent_id=role_agent.agent_id,
+            agent_role=role_agent.role,
+            tool_name=tool_name,
+            tool_args=tool_args,
+            tool_call_id=f"{role_agent.agent_id}-{prefix}-{state.loop_round}-{index}",
+            result=result,
+        )
+        executed += 1
+        if tool_name == "prometheus_query":
+            family = _prometheus_query_family(tool_args)
+            if family and (
+                _is_empty_prometheus_result(result)
+                or _is_answered_prometheus_result(result)
+            ):
+                settled_prometheus_families.add(family)
+    return executed, emitted_events
+
+
+async def _run_role_tool_loop_impl(
+    *,
+    role_agent: Any,
+    role_name: str,
+    system_prompt: str,
+    user_prompt: str,
+    allowed_tool_names: list[str],
+    max_tool_calls: int,
+    on_tool_result: Callable[[str, dict[str, Any], str, dict[str, Any]], Awaitable[ToolLoopStopSignal | None]],
+    loop_history_messages: list | None,
+    state: MASState,
+    post_action_check_tool_baseline: int | None,
+    emit: EmitCallable,
+    call_tool: CallToolCallable,
+) -> tuple[ToolLoopOutcome, list[dict[str, Any]]]:
+    """LLM tool-call loop with dedup / stop-signal / stalled-round handling.
+
+    All moving parts of one tool loop sit here together: bind_tools, retry on
+    transient LLM errors, signature dedup, Prometheus settled-family skip,
+    companion-skip stop signal, stalled-round early termination, and per-round
+    usage aggregation. Extracted from ``stream()`` so it can be reasoned about
+    without scrolling through 4 stage branches.
+    """
+    role_agent.last_usage = {
+        "llm_calls": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "total_tokens": 0,
+        "reported_token_calls": 0,
+        "missing_token_calls": 0,
+    }
+    role_agent.last_latency_ms = 0
+    tool_map = {
+        tool.name: tool
+        for tool in ALL_TOOLS
+        if tool.name in set(allowed_tool_names)
+    }
+    if not tool_map:
+        return ToolLoopOutcome(summary="", tool_calls=0), []
+
+    evidence_dicts = _extract_evidence_from_tool_records(state.tool_records)
+
+    messages: list[Any] = [SystemMessage(content=system_prompt)]
+    if loop_history_messages:
+        messages.extend(loop_history_messages)
+    messages.append(HumanMessage(content=user_prompt))
+    llm_with_tools = role_agent.llm.bind_tools(list(tool_map.values()))
+    collected_events: list[dict[str, Any]] = []
+    aggregate_usage: dict[str, int] = {
+        "llm_calls": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "total_tokens": 0,
+        "reported_token_calls": 0,
+        "missing_token_calls": 0,
+    }
+    aggregate_latency_ms = 0
+    invoked_tool_calls = 0
+    stalled_tool_rounds = 0
+    pending_stop_signal: ToolLoopStopSignal | None = None
+    duplicate_baseline = (
+        post_action_check_tool_baseline
+        if _has_terminal_write_result(state)
+        else None
+    )
+    settled_prometheus_families = _settled_prometheus_families(
+        state,
+        baseline=duplicate_baseline,
+    )
+
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=1, max=8),
+        retry=retry_if_exception_type(_RETRYABLE_TOOL_LOOP_LLM_ERRORS),
+        before_sleep=lambda rs: logger.warning(
+            "[%s/%s] tool-loop LLM retry #%d after %s: %s",
+            role_name,
+            role_agent.agent_id,
+            rs.attempt_number,
+            type(rs.outcome.exception()).__name__,
+            rs.outcome.exception(),
+        ),
+    )
+    async def _invoke_tool_loop_llm(current_messages: list[Any]) -> Any:
+        return await llm_with_tools.ainvoke(current_messages)
+
+    selected = ""
+    for loop_index in range(max(1, max_tool_calls + 1)):
+        llm_started_at = time.monotonic()
+        response = await _invoke_tool_loop_llm(messages)
+        aggregate_latency_ms += int((time.monotonic() - llm_started_at) * 1000)
+        content, reasoning = role_agent._extract_response_texts(response)
+        selected = role_agent._select_response_text(content=content, reasoning=reasoning)
+        aggregate_usage = role_agent._merge_usage(
+            aggregate_usage,
+            _extract_usage_from_tool_loop_response(
+                role_agent,
+                response,
+                messages,
+                selected,
+            ),
+        )
+        role_agent.last_content = content
+        role_agent.last_reasoning_content = reasoning
+        role_agent.last_selected_text = selected
+        messages.append(response)
+
+        tool_calls = list(getattr(response, "tool_calls", []) or [])
+        if not tool_calls:
+            role_agent.last_usage = aggregate_usage
+            role_agent.last_latency_ms = aggregate_latency_ms
+            return ToolLoopOutcome(
+                summary=selected or role_agent.latest_reasoning_summary(),
+                tool_calls=invoked_tool_calls,
+            ), collected_events
+
+        if invoked_tool_calls >= max_tool_calls:
+            role_agent.last_usage = aggregate_usage
+            role_agent.last_latency_ms = aggregate_latency_ms
+            summary = selected or role_agent.latest_reasoning_summary()
+            if not summary:
+                summary = "已达到工具调用上限，请基于已有结果继续下一步。"
+            return ToolLoopOutcome(summary=summary, tool_calls=invoked_tool_calls), collected_events
+
+        executed_new_tool_in_round = False
+        for tool_index, tool_call in enumerate(tool_calls, start=1):
+            tool_name = str(tool_call.get("name") or "").strip()
+            tool_args = tool_call.get("args") if isinstance(tool_call.get("args"), dict) else {}
+            tool_call_id = str(
+                tool_call.get("id") or f"{role_agent.agent_id}-tool-loop-{loop_index}-{tool_index}"
+            )
+            tool_observation = ""
+
+            if (
+                pending_stop_signal
+                and pending_stop_signal.should_stop
+                and not pending_stop_signal.allow_current_batch
+            ):
+                break
+            if (
+                role_name == "explorer"
+                and tool_name == "prometheus_query"
+                and (family := _prometheus_query_family(tool_args))
+                and family in settled_prometheus_families
+            ):
+                messages.append(
+                    ToolMessage(
+                        content=(
+                            "这个 Prometheus 查询族已经得到结果或明确空结果。不要继续尝试语义相近的 PromQL；"
+                            "请基于已有指标结果总结，或只在新的未决事实需要不同指标族时再查询。"
+                        ),
+                        tool_call_id=tool_call_id,
+                    )
+                )
+                continue
+
+            if not tool_name or tool_name not in tool_map:
+                result: dict[str, Any] = {
+                    "status": "error",
+                    "message": f"Tool '{tool_name}' is not available for role '{role_name}'",
+                }
+                tool_observation = result["message"]
+                collected_events.append(
+                    await emit(
+                        "tool_call_completed",
+                        {
+                            "agentId": role_agent.agent_id,
+                            "agentRole": role_name,
+                            "toolCallId": tool_call_id,
+                            "toolName": tool_name,
+                            "toolArgs": tool_args,
+                            "result": result["message"],
+                            "resultSummary": result["message"],
+                            "status": "error",
+                            "isError": True,
+                        },
+                    )
+                )
+            else:
+                signature = _tool_signature(tool_name, tool_args)
+                if signature in state.attempted_tool_signatures:
+                    previous_result = _find_previous_tool_result(
+                        evidence_dicts,
+                        tool_name=tool_name,
+                        tool_args=tool_args,
+                    )
+                    previous_result_summary = (
+                        _build_tool_loop_observation(tool_name, previous_result)
+                        if previous_result
+                        else ""
+                    )
+                    duplicate_message = (
+                        f"Tool {tool_name} 已经用相同参数执行过，不要重复调用。"
+                        "请直接基于已有结果继续推理。"
+                    )
+                    if previous_result_summary:
+                        duplicate_message += f"\n已有结果:\n{previous_result_summary}"
+                    result = {
+                        "status": "skipped",
+                        "message": duplicate_message,
+                    }
+                    tool_observation = duplicate_message
+                    collected_events.append(
+                        await emit(
+                            "tool_call_completed",
+                            {
+                                "agentId": role_agent.agent_id,
+                                "agentRole": role_name,
+                                "toolCallId": tool_call_id,
+                                "toolName": tool_name,
+                                "toolArgs": tool_args,
+                                "result": result["message"],
+                                "resultSummary": result["message"],
+                                "status": "skipped",
+                                "isError": False,
+                            },
+                        )
+                    )
+                elif _has_equivalent_tool_evidence(
+                    state,
+                    tool_name=tool_name,
+                    tool_args=tool_args,
+                    baseline=duplicate_baseline,
+                ):
+                    duplicate_message = (
+                        f"已有 {tool_name} 结果覆盖目标对象。"
+                        "不要重复调用，请基于已有结果继续推理。"
+                    )
+                    result = {
+                        "status": "skipped",
+                        "message": duplicate_message,
+                    }
+                    tool_observation = duplicate_message
+                    collected_events.append(
+                        await emit(
+                            "tool_call_completed",
+                            {
+                                "agentId": role_agent.agent_id,
+                                "agentRole": role_name,
+                                "toolCallId": tool_call_id,
+                                "toolName": tool_name,
+                                "toolArgs": tool_args,
+                                "result": duplicate_message,
+                                "resultSummary": duplicate_message,
+                                "status": "skipped",
+                                "isError": False,
+                            },
+                        )
+                    )
+                else:
+                    state.attempted_tool_signatures.append(signature)
+                    result, tool_events = await call_tool(
+                        role_agent_id=role_agent.agent_id,
+                        role_name=role_name,
+                        tool_name=tool_name,
+                        tool_args=tool_args,
+                        tool_call_id=tool_call_id,
+                    )
+                    collected_events.extend(tool_events)
+                    invoked_tool_calls += 1
+                    executed_new_tool_in_round = True
+                    tool_observation = _build_tool_loop_observation(tool_name, result)
+                    if role_name == "explorer" and tool_name == "prometheus_query":
+                        family = _prometheus_query_family(tool_args)
+                        if family and (
+                            _is_empty_prometheus_result(result)
+                            or _is_answered_prometheus_result(result)
+                        ):
+                            settled_prometheus_families.add(family)
+
+            messages.append(
+                ToolMessage(
+                    content=tool_observation or _build_tool_loop_observation(tool_name, result),
+                    tool_call_id=tool_call_id,
+                )
+            )
+            if result.get("status") != "skipped":
+                stop_signal = await on_tool_result(tool_name, tool_args, tool_call_id, result)
+                # The callback records successful tool evidence into
+                # state. Refresh after it runs so duplicate prompts in
+                # the same native tool loop can cite the actual result.
+                evidence_dicts = _extract_evidence_from_tool_records(state.tool_records)
+                if stop_signal and stop_signal.should_stop:
+                    pending_stop_signal = stop_signal
+                    break
+
+            if invoked_tool_calls >= max_tool_calls:
+                break
+
+        if pending_stop_signal and pending_stop_signal.should_stop:
+            role_agent.last_usage = aggregate_usage
+            role_agent.last_latency_ms = aggregate_latency_ms
+            return ToolLoopOutcome(
+                summary=pending_stop_signal.summary or selected or role_agent.latest_reasoning_summary(),
+                tool_calls=invoked_tool_calls,
+                stop_signal=pending_stop_signal,
+            ), collected_events
+
+        if executed_new_tool_in_round:
+            stalled_tool_rounds = 0
+        else:
+            stalled_tool_rounds += 1
+            if stalled_tool_rounds >= 1:
+                role_agent.last_usage = aggregate_usage
+                role_agent.last_latency_ms = aggregate_latency_ms
+                summary = selected or role_agent.latest_reasoning_summary()
+                if not summary:
+                    summary = "工具调用连续重复且没有产生新结果，已停止继续调用。"
+                return ToolLoopOutcome(
+                    summary=summary,
+                    tool_calls=invoked_tool_calls,
+                ), collected_events
+
+    role_agent.last_usage = aggregate_usage
+    role_agent.last_latency_ms = aggregate_latency_ms
+    return ToolLoopOutcome(
+        summary=role_agent.latest_reasoning_summary() or "已完成工具执行。",
+        tool_calls=invoked_tool_calls,
+    ), collected_events
+
+
+# ---------------------------------------------------------------------------
 # MultiAgentOrchestrator
 # ---------------------------------------------------------------------------
 
@@ -3306,109 +3877,19 @@ class MultiAgentOrchestrator:
             tool_args: dict[str, Any],
             tool_call_id: str,
         ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-            if not is_tool_allowed_for_role(role_name, tool_name):
-                logger.warning("Tool '%s' not allowed for role '%s', skipping", tool_name, role_name)
-                result = {
-                    "status": "error",
-                    "message": f"Tool '{tool_name}' is not allowed for role '{role_name}'",
-                }
-                return result, [
-                    await emit(
-                        "tool_call_completed",
-                        {
-                            "agentId": role_agent_id,
-                            "agentRole": role_name,
-                            "toolCallId": tool_call_id,
-                            "toolName": tool_name,
-                            "toolArgs": tool_args,
-                            "result": result["message"],
-                            "resultSummary": result["message"],
-                            "status": "error",
-                            "isError": True,
-                        },
-                    )
-                ]
-
-            events = [
-                await emit(
-                    "tool_call_started",
-                    {
-                        "agentId": role_agent_id,
-                        "agentRole": role_name,
-                        "toolCallId": tool_call_id,
-                        "toolName": tool_name,
-                        "toolArgs": tool_args,
-                        "status": "executing",
-                    },
-                )
-            ]
-            state.usage_summary.tool_calls += 1
-            if tool_name in READ_ONLY_TOOL_NAMES:
-                state.usage_summary.read_tool_calls += 1
-            else:
-                state.usage_summary.write_tool_calls += 1
-            tool_started_at = time.perf_counter()
-            result = await self.tool_executor.execute(
+            # Thin adapter — concrete logic lives in module-level
+            # `_call_tool_with_events` so it's testable in isolation.
+            return await _call_tool_with_events(
+                tool_executor=self.tool_executor,
+                state=state,
+                request=request,
+                emit=emit,
+                role_agent_id=role_agent_id,
+                role_name=role_name,
                 tool_name=tool_name,
                 tool_args=tool_args,
-                session_id=request.session_id,
-                user_id=int(
-                    (dict(getattr(request, "context", None) or {}).get("actor") or {}).get("user_id") or 0
-                ),
-                turn_id=request.turn_id,
                 tool_call_id=tool_call_id,
-                agent_id=role_agent_id,
-                agent_role=role_name,
-                actor_role=state.goal.actor_role,
             )
-            measured_tool_latency_ms = max(1, int((time.perf_counter() - tool_started_at) * 1000))
-            if not isinstance(result, dict):
-                result = {"status": "error", "message": str(result)}
-            if not result.get("_latency_ms"):
-                result["_latency_ms"] = measured_tool_latency_ms
-            state.usage_summary.tool_latency_ms += int(result.get("_latency_ms") or 0)
-            if result.get("status") == "confirmation_required":
-                confirmation = result.get("confirmation", {})
-                events.append(
-                    await emit(
-                        "tool_call_confirmation_required",
-                        {
-                            "agentId": role_agent_id,
-                            "agentRole": role_name,
-                            "toolCallId": tool_call_id,
-                            "confirmId": confirmation.get("confirm_id", ""),
-                            "action": confirmation.get("tool_name", tool_name),
-                            "description": confirmation.get("description", ""),
-                            "interaction": confirmation.get("interaction", "approval"),
-                            "form": confirmation.get("form"),
-                            "status": "awaiting_confirmation",
-                            "latencyMs": result.get("_latency_ms", 0),
-                        },
-                    )
-                )
-                return result, events
-
-            events.append(
-                await emit(
-                    "tool_call_completed",
-                    {
-                        "agentId": role_agent_id,
-                        "agentRole": role_name,
-                        "toolCallId": tool_call_id,
-                        "toolName": tool_name,
-                        "toolArgs": tool_args,
-                        "result": result.get("result", result.get("message", "")),
-                        "resultSummary": str(result.get("result", result.get("message", "")))[:500],
-                        "status": "error" if result.get("status") == "error" else "done",
-                        "isError": result.get("status") == "error",
-                        "latencyMs": result.get("_latency_ms", 0),
-                    },
-                )
-            )
-            report_payload = build_pipeline_report_payload(tool_name, result)
-            if report_payload:
-                events.append(await emit("pipeline_report", report_payload))
-            return result, events
 
         async def execute_read_tool_pairs(
             *,
@@ -3417,61 +3898,18 @@ class MultiAgentOrchestrator:
             prefix: str,
             limit: int | None = None,
         ) -> tuple[int, list[dict[str, Any]]]:
-            executed = 0
-            emitted_events: list[dict[str, Any]] = []
-            max_pairs = max(0, int(limit if limit is not None else len(pairs)))
-            duplicate_baseline = (
-                post_action_check_tool_baseline
-                if _has_terminal_write_result(state)
-                else None
+            # Thin adapter — concrete logic lives in
+            # `_execute_read_tool_pairs_impl`. Closure exists to read the
+            # current value of `post_action_check_tool_baseline`.
+            return await _execute_read_tool_pairs_impl(
+                pairs=pairs,
+                role_agent=role_agent,
+                prefix=prefix,
+                limit=limit,
+                state=state,
+                post_action_check_tool_baseline=post_action_check_tool_baseline,
+                call_tool=call_tool,
             )
-            settled_prometheus_families = _settled_prometheus_families(
-                state,
-                baseline=duplicate_baseline,
-            )
-            for index, (tool_name, tool_args) in enumerate(pairs[:max_pairs], start=1):
-                if tool_name not in READ_ONLY_TOOL_NAMES:
-                    continue
-                if tool_name == "prometheus_query":
-                    family = _prometheus_query_family(tool_args)
-                    if family and family in settled_prometheus_families:
-                        continue
-                if _has_equivalent_tool_evidence(
-                    state,
-                    tool_name=tool_name,
-                    tool_args=tool_args,
-                    baseline=duplicate_baseline,
-                ):
-                    continue
-                signature = _tool_signature(tool_name, tool_args)
-                if signature in state.attempted_tool_signatures:
-                    continue
-                state.attempted_tool_signatures.append(signature)
-                result, tool_events = await call_tool(
-                    role_agent_id=role_agent.agent_id,
-                    role_name=role_agent.role,
-                    tool_name=tool_name,
-                    tool_args=tool_args,
-                    tool_call_id=f"{role_agent.agent_id}-{prefix}-{state.loop_round}-{index}",
-                )
-                emitted_events.extend(tool_events)
-                state.remember_tool(
-                    agent_id=role_agent.agent_id,
-                    agent_role=role_agent.role,
-                    tool_name=tool_name,
-                    tool_args=tool_args,
-                    tool_call_id=f"{role_agent.agent_id}-{prefix}-{state.loop_round}-{index}",
-                    result=result,
-                )
-                executed += 1
-                if tool_name == "prometheus_query":
-                    family = _prometheus_query_family(tool_args)
-                    if family and (
-                        _is_empty_prometheus_result(result)
-                        or _is_answered_prometheus_result(result)
-                    ):
-                        settled_prometheus_families.add(family)
-            return executed, emitted_events
 
         async def run_role_tool_loop(
             *,
@@ -3484,301 +3922,24 @@ class MultiAgentOrchestrator:
             on_tool_result: Callable[[str, dict[str, Any], str, dict[str, Any]], Awaitable[ToolLoopStopSignal | None]],
             loop_history_messages: list | None = None,
         ) -> tuple[ToolLoopOutcome, list[dict[str, Any]]]:
-            role_agent.last_usage = {
-                "llm_calls": 0,
-                "input_tokens": 0,
-                "output_tokens": 0,
-                "total_tokens": 0,
-                "reported_token_calls": 0,
-                "missing_token_calls": 0,
-            }
-            role_agent.last_latency_ms = 0
-            tool_map = {
-                tool.name: tool
-                for tool in ALL_TOOLS
-                if tool.name in set(allowed_tool_names)
-            }
-            if not tool_map:
-                return ToolLoopOutcome(summary="", tool_calls=0), []
-
-            evidence_dicts = _extract_evidence_from_tool_records(state.tool_records)
-
-            messages: list[Any] = [SystemMessage(content=system_prompt)]
-            if loop_history_messages:
-                messages.extend(loop_history_messages)
-            messages.append(HumanMessage(content=user_prompt))
-            llm_with_tools = role_agent.llm.bind_tools(list(tool_map.values()))
-            collected_events: list[dict[str, Any]] = []
-            aggregate_usage: dict[str, int] = {
-                "llm_calls": 0,
-                "input_tokens": 0,
-                "output_tokens": 0,
-                "total_tokens": 0,
-                "reported_token_calls": 0,
-                "missing_token_calls": 0,
-            }
-            aggregate_latency_ms = 0
-            invoked_tool_calls = 0
-            stalled_tool_rounds = 0
-            pending_stop_signal: ToolLoopStopSignal | None = None
-            duplicate_baseline = (
-                post_action_check_tool_baseline
-                if _has_terminal_write_result(state)
-                else None
+            # Thin adapter — concrete tool-loop body lives in module-level
+            # `_run_role_tool_loop_impl`. This closure exists to capture
+            # `state`, `emit`, `call_tool` and the current value of
+            # `post_action_check_tool_baseline` for the call site.
+            return await _run_role_tool_loop_impl(
+                role_agent=role_agent,
+                role_name=role_name,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                allowed_tool_names=allowed_tool_names,
+                max_tool_calls=max_tool_calls,
+                on_tool_result=on_tool_result,
+                loop_history_messages=loop_history_messages,
+                state=state,
+                post_action_check_tool_baseline=post_action_check_tool_baseline,
+                emit=emit,
+                call_tool=call_tool,
             )
-            settled_prometheus_families = _settled_prometheus_families(
-                state,
-                baseline=duplicate_baseline,
-            )
-
-            @retry(
-                stop=stop_after_attempt(3),
-                wait=wait_exponential(multiplier=1, min=1, max=8),
-                retry=retry_if_exception_type(_RETRYABLE_TOOL_LOOP_LLM_ERRORS),
-                before_sleep=lambda rs: logger.warning(
-                    "[%s/%s] tool-loop LLM retry #%d after %s: %s",
-                    role_name,
-                    role_agent.agent_id,
-                    rs.attempt_number,
-                    type(rs.outcome.exception()).__name__,
-                    rs.outcome.exception(),
-                ),
-            )
-            async def _invoke_tool_loop_llm(current_messages: list[Any]) -> Any:
-                return await llm_with_tools.ainvoke(current_messages)
-
-            for loop_index in range(max(1, max_tool_calls + 1)):
-                llm_started_at = time.monotonic()
-                response = await _invoke_tool_loop_llm(messages)
-                aggregate_latency_ms += int((time.monotonic() - llm_started_at) * 1000)
-                content, reasoning = role_agent._extract_response_texts(response)
-                selected = role_agent._select_response_text(content=content, reasoning=reasoning)
-                aggregate_usage = role_agent._merge_usage(
-                    aggregate_usage,
-                    _extract_usage_from_tool_loop_response(
-                        role_agent,
-                        response,
-                        messages,
-                        selected,
-                    ),
-                )
-                role_agent.last_content = content
-                role_agent.last_reasoning_content = reasoning
-                role_agent.last_selected_text = selected
-                messages.append(response)
-
-                tool_calls = list(getattr(response, "tool_calls", []) or [])
-                if not tool_calls:
-                    role_agent.last_usage = aggregate_usage
-                    role_agent.last_latency_ms = aggregate_latency_ms
-                    return ToolLoopOutcome(
-                        summary=selected or role_agent.latest_reasoning_summary(),
-                        tool_calls=invoked_tool_calls,
-                    ), collected_events
-
-                if invoked_tool_calls >= max_tool_calls:
-                    role_agent.last_usage = aggregate_usage
-                    role_agent.last_latency_ms = aggregate_latency_ms
-                    summary = selected or role_agent.latest_reasoning_summary()
-                    if not summary:
-                        summary = "已达到工具调用上限，请基于已有结果继续下一步。"
-                    return ToolLoopOutcome(summary=summary, tool_calls=invoked_tool_calls), collected_events
-
-                executed_new_tool_in_round = False
-                for tool_index, tool_call in enumerate(tool_calls, start=1):
-                    tool_name = str(tool_call.get("name") or "").strip()
-                    tool_args = tool_call.get("args") if isinstance(tool_call.get("args"), dict) else {}
-                    tool_call_id = str(
-                        tool_call.get("id") or f"{role_agent.agent_id}-tool-loop-{loop_index}-{tool_index}"
-                    )
-                    tool_observation = ""
-
-                    if (
-                        pending_stop_signal
-                        and pending_stop_signal.should_stop
-                        and not pending_stop_signal.allow_current_batch
-                    ):
-                        break
-                    if (
-                        role_name == "explorer"
-                        and tool_name == "prometheus_query"
-                        and (family := _prometheus_query_family(tool_args))
-                        and family in settled_prometheus_families
-                    ):
-                        messages.append(
-                            ToolMessage(
-                                content=(
-                                    "这个 Prometheus 查询族已经得到结果或明确空结果。不要继续尝试语义相近的 PromQL；"
-                                    "请基于已有指标结果总结，或只在新的未决事实需要不同指标族时再查询。"
-                                ),
-                                tool_call_id=tool_call_id,
-                            )
-                        )
-                        continue
-
-                    if not tool_name or tool_name not in tool_map:
-                        result: dict[str, Any] = {
-                            "status": "error",
-                            "message": f"Tool '{tool_name}' is not available for role '{role_name}'",
-                        }
-                        tool_observation = result["message"]
-                        collected_events.append(
-                            await emit(
-                                "tool_call_completed",
-                                {
-                                    "agentId": role_agent.agent_id,
-                                    "agentRole": role_name,
-                                    "toolCallId": tool_call_id,
-                                    "toolName": tool_name,
-                                    "toolArgs": tool_args,
-                                    "result": result["message"],
-                                    "resultSummary": result["message"],
-                                    "status": "error",
-                                    "isError": True,
-                                },
-                            )
-                        )
-                    else:
-                        signature = _tool_signature(tool_name, tool_args)
-                        if signature in state.attempted_tool_signatures:
-                            previous_result = _find_previous_tool_result(
-                                evidence_dicts,
-                                tool_name=tool_name,
-                                tool_args=tool_args,
-                            )
-                            previous_result_summary = (
-                                _build_tool_loop_observation(tool_name, previous_result)
-                                if previous_result
-                                else ""
-                            )
-                            duplicate_message = (
-                                f"Tool {tool_name} 已经用相同参数执行过，不要重复调用。"
-                                "请直接基于已有结果继续推理。"
-                            )
-                            if previous_result_summary:
-                                duplicate_message += f"\n已有结果:\n{previous_result_summary}"
-                            result = {
-                                "status": "skipped",
-                                "message": duplicate_message,
-                            }
-                            tool_observation = duplicate_message
-                            collected_events.append(
-                                await emit(
-                                    "tool_call_completed",
-                                    {
-                                        "agentId": role_agent.agent_id,
-                                        "agentRole": role_name,
-                                        "toolCallId": tool_call_id,
-                                        "toolName": tool_name,
-                                        "toolArgs": tool_args,
-                                        "result": result["message"],
-                                        "resultSummary": result["message"],
-                                        "status": "skipped",
-                                        "isError": False,
-                                    },
-                                )
-                            )
-                        elif _has_equivalent_tool_evidence(
-                            state,
-                            tool_name=tool_name,
-                            tool_args=tool_args,
-                            baseline=duplicate_baseline,
-                        ):
-                            duplicate_message = (
-                                f"已有 {tool_name} 结果覆盖目标对象。"
-                                "不要重复调用，请基于已有结果继续推理。"
-                            )
-                            result = {
-                                "status": "skipped",
-                                "message": duplicate_message,
-                            }
-                            tool_observation = duplicate_message
-                            collected_events.append(
-                                await emit(
-                                    "tool_call_completed",
-                                    {
-                                        "agentId": role_agent.agent_id,
-                                        "agentRole": role_name,
-                                        "toolCallId": tool_call_id,
-                                        "toolName": tool_name,
-                                        "toolArgs": tool_args,
-                                        "result": duplicate_message,
-                                        "resultSummary": duplicate_message,
-                                        "status": "skipped",
-                                        "isError": False,
-                                    },
-                                )
-                            )
-                        else:
-                            state.attempted_tool_signatures.append(signature)
-                            result, tool_events = await call_tool(
-                                role_agent_id=role_agent.agent_id,
-                                role_name=role_name,
-                                tool_name=tool_name,
-                                tool_args=tool_args,
-                                tool_call_id=tool_call_id,
-                            )
-                            collected_events.extend(tool_events)
-                            invoked_tool_calls += 1
-                            executed_new_tool_in_round = True
-                            tool_observation = _build_tool_loop_observation(tool_name, result)
-                            if role_name == "explorer" and tool_name == "prometheus_query":
-                                family = _prometheus_query_family(tool_args)
-                                if family and (
-                                    _is_empty_prometheus_result(result)
-                                    or _is_answered_prometheus_result(result)
-                                ):
-                                    settled_prometheus_families.add(family)
-
-                    messages.append(
-                        ToolMessage(
-                            content=tool_observation or _build_tool_loop_observation(tool_name, result),
-                            tool_call_id=tool_call_id,
-                        )
-                    )
-                    if result.get("status") != "skipped":
-                        stop_signal = await on_tool_result(tool_name, tool_args, tool_call_id, result)
-                        # The callback records successful tool evidence into
-                        # state. Refresh after it runs so duplicate prompts in
-                        # the same native tool loop can cite the actual result.
-                        evidence_dicts = _extract_evidence_from_tool_records(state.tool_records)
-                        if stop_signal and stop_signal.should_stop:
-                            pending_stop_signal = stop_signal
-                            break
-
-                    if invoked_tool_calls >= max_tool_calls:
-                        break
-
-                if pending_stop_signal and pending_stop_signal.should_stop:
-                    role_agent.last_usage = aggregate_usage
-                    role_agent.last_latency_ms = aggregate_latency_ms
-                    return ToolLoopOutcome(
-                        summary=pending_stop_signal.summary or selected or role_agent.latest_reasoning_summary(),
-                        tool_calls=invoked_tool_calls,
-                        stop_signal=pending_stop_signal,
-                    ), collected_events
-
-                if executed_new_tool_in_round:
-                    stalled_tool_rounds = 0
-                else:
-                    stalled_tool_rounds += 1
-                    if stalled_tool_rounds >= 1:
-                        role_agent.last_usage = aggregate_usage
-                        role_agent.last_latency_ms = aggregate_latency_ms
-                        summary = selected or role_agent.latest_reasoning_summary()
-                        if not summary:
-                            summary = "工具调用连续重复且没有产生新结果，已停止继续调用。"
-                        return ToolLoopOutcome(
-                            summary=summary,
-                            tool_calls=invoked_tool_calls,
-                        ), collected_events
-
-            role_agent.last_usage = aggregate_usage
-            role_agent.last_latency_ms = aggregate_latency_ms
-            return ToolLoopOutcome(
-                summary=role_agent.latest_reasoning_summary() or "已完成工具执行。",
-                tool_calls=invoked_tool_calls,
-            ), collected_events
 
         def ensure_action_item(tool_name: str, tool_args: dict[str, Any]) -> MultiAgentActionItem:
             signature = _tool_signature(tool_name, tool_args)
@@ -4053,38 +4214,20 @@ class MultiAgentOrchestrator:
                 try:
                     coordinator_decision = await coordinator.run_json(
                         system_prompt=(
-                            "你是 Crater MAS 的 Coordinator 协调者。你根据当前状态决定下一步。\n\n"
-                            "可选动作：\n"
-                            '- "plan": 问题复杂、工具链不明确、或需要先拆解步骤\n'
-                            '- "observe": 需要收集更多信息（调用只读工具）\n'
-                            '- "act": 需要执行操作（调用写工具，或 executor 先读后写）\n'
-                            '- "verify": 需要对当前结论做一次验证/挑战\n'
-                            '- "replan": 当前计划与实际收集的证据不匹配，需要 Planner 重新规划\n'
-                            '- "finalize": 信息已足够，可以回答用户了\n\n'
+                            "你是 Crater MAS 的 Coordinator 协调者。基于决策上下文选择下一步。\n\n"
+                            "可选动作：plan / observe / act / verify / replan / finalize\n\n"
                             "决策原则：\n"
-                            "- 第一轮不一定要 plan；简单查询可直接 observe，写操作目标明确可直接 act，信息足够可 finalize\n"
-                            "- 只有当工具链不明确、多阶段任务、故障复杂、或已有证据无法支持下一步时才选 plan/replan；简单且目标明确的只读查询可直接 observe，由 Explorer 使用最小工具集取证\n"
-                            "- 有计划就按计划推进，不要无故偏离；如果计划明显不匹配最新证据，才 replan\n"
-                            "- verify 成本高且不是常规阶段；只有高风险写操作已经实际完成、证据互相冲突、或复杂根因判断可能伤害用户时才选 verify\n"
-                            "- read-only 调查、普通查询、低风险确认结果、权限拒绝、healthy/noop 和证据直接充分的场景应直接 finalize，不要为了保险选择 verify\n"
-                            "- 如果没有成功执行过确认型写工具，通常不需要 verify；除非你能指出具体冲突证据或复杂根因风险\n"
-                            "- 如果已收集的证据足以回答用户，选 finalize\n"
-                            "- 如果当前是基于上一轮诊断的追问，且 decision_context.history_followup_with_context=true，优先直接 finalize；不要重复调用上一轮已经用过的作业详情/诊断工具\n"
-                            "- 如果证据和用户请求明显不匹配、计划走偏了，选 replan\n"
-                            "- 如果需要执行写操作且目标明确，选 act\n"
-                            "- 如果还缺关键信息，选 observe\n"
-                            "- 如果 Coordinator 决策上下文中的 recommended_next_stage_hint 明确指出 observe/act/finalize，优先遵循；只有你能说清楚具体缺口时才偏离\n"
-                            "- 如果 action_readiness.write_permission_gap=true，不要选 act；可以先基于普通只读权限 observe，已能解释现象或无法继续取证时 finalize，并说明不能代执行管理员写操作\n"
-                            "- 确认类写操作不要扩散取证：目标明确且只差动作前最小核验时选 act，让 Executor 做一次必要只读核验后调用确认型写工具\n"
-                            "- 如果用户明确要求 restart/scale 且对应结构化写工具可用，即使页面缺少 workload 字段，也不要只因目标字段缺失而 finalize；应交给 Executor 基于用户文本、证据和工具描述确定目标并发起确认，或说明仍缺哪个必要字段\n"
-                            "- 确认型写操作已经完成且用户要求执行后检查时，必须同时满足 Coordinator 决策上下文里的目标状态缺口和症状/指标缺口；如果 missing_facts 仍提示目标状态或指标证据缺失，不要 finalize，应 observe 补最小只读证据\n"
-                            "- 如果 missing_facts 提示这是承接上一轮候选对象的诊断追问，不要 finalize 成“需要再获取证据”的口头答复；应 observe，让 Explorer 用历史列表解析对象并调用详情/事件/日志等只读工具\n"
-                            "- 健康/noop 或“是否正常/需不需要处理”类请求不能只看 Running 状态；若 query_job_metrics 可用且尚未调用，应优先 observe 补一条指标证据\n"
-                            "- observe 必须对应 missing_facts 里的具体缺口；不要因为“还能再看看”而重复读取同一事实桶\n"
-                            "- 如果 over_exploration_warnings 非空，除非 missing_facts 仍有会改变结论的缺口，否则选 finalize 或 act\n"
-                            "- 如果当前能力或证据明确无法满足请求，不要空转；说明限制并 finalize\n"
-                            "- 不要反复 observe/act 相同内容，如果工具已调用超过 10 次且证据充分，应当 finalize\n"
-                            "- 连续无进展 ≥ 1 轮时，强烈建议 finalize，不要继续空转\n\n"
+                            "- 简单且目标明确的只读查询直接 observe；写操作目标明确直接 act；信息足够直接 finalize\n"
+                            "- 只在工具链不明确、多阶段任务或证据无法支持下一步时 plan/replan\n"
+                            "- 有计划就按计划推进；只在计划明显不匹配证据时 replan\n"
+                            "- verify 是低频复核：只在高风险写操作已完成、证据冲突或根因复杂会影响用户决策时使用\n"
+                            "- read-only 调查、healthy/noop、权限拒绝、低风险确认结果应直接 finalize\n"
+                            "- 没有成功执行过确认型写工具时通常不 verify\n"
+                            "- decision_context.history_followup_with_context=true 时优先 finalize\n"
+                            "- action_readiness.write_permission_gap=true 时不要 act\n"
+                            "- missing_facts 非空且关键缺口仍能改变结论 → observe；observe 必须对应具体缺口\n"
+                            "- over_exploration_warnings 非空且 missing_facts 没有关键缺口 → finalize 或 act\n"
+                            "- 连续无进展 ≥ 1 轮 → finalize\n\n"
                             '输出 JSON: {"next": "plan|observe|act|verify|replan|finalize", "reason": "简短理由"}\n'
                             + tool_stats
                         ),
@@ -4123,12 +4266,23 @@ class MultiAgentOrchestrator:
             if state.loop_round > 1:
                 resumed_action = None
 
-            if next_stage == "plan" and state.plan and current_progress_signature == last_replan_signature:
+            # Plan/replan signature skip: only override when state is truly stuck
+            # (max rounds approached or no progress). Otherwise, trust Coordinator —
+            # it may have a legitimate reason to replan even when the signature is
+            # unchanged (new user message, risk re-evaluation).
+            stage_stuck = (
+                current_progress_signature == last_replan_signature
+                and (
+                    state.no_progress_count >= 1
+                    or state.loop_round >= max(1, state.runtime_config.lead_max_rounds - 1)
+                )
+            )
+            if next_stage == "plan" and state.plan and stage_stuck:
                 next_stage = "observe" if not state.tool_records else "finalize"
                 state.remember_controller_decision({
                     "round": state.loop_round,
                     "stage": "plan_skipped",
-                    "reason": "state_unchanged_since_existing_plan",
+                    "reason": "state_unchanged_and_no_progress",
                     "next_stage": next_stage,
                 })
                 yield await emit(
@@ -4137,10 +4291,10 @@ class MultiAgentOrchestrator:
                         "agentId": coordinator.agent_id,
                         "agentRole": coordinator.role,
                         "status": "plan_skipped",
-                        "summary": "Planner 已跳过：已有计划且状态没有变化",
+                        "summary": "Planner 已跳过：状态未变且已无进展",
                     },
                 )
-            if next_stage == "replan" and current_progress_signature == last_replan_signature:
+            if next_stage == "replan" and stage_stuck:
                 frontier = state.action_frontier()
                 if frontier or (_has_write_intent(routing) and not _has_terminal_write_result(state)):
                     next_stage = "act"
@@ -4151,7 +4305,7 @@ class MultiAgentOrchestrator:
                 state.remember_controller_decision({
                     "round": state.loop_round,
                     "stage": "replan_skipped",
-                    "reason": "state_unchanged_since_last_replan",
+                    "reason": "state_unchanged_and_no_progress",
                     "next_stage": next_stage,
                 })
                 yield await emit(
