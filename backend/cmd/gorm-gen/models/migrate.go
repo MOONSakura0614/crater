@@ -973,6 +973,32 @@ func main() {
 			},
 		},
 		{
+			ID: "202604180001",
+			Migrate: func(tx *gorm.DB) error {
+				return runStatements(tx, []string{
+					`ALTER TABLE approval_orders
+						ADD COLUMN IF NOT EXISTS review_source VARCHAR(32) DEFAULT '',
+						ADD COLUMN IF NOT EXISTS agent_report TEXT DEFAULT ''`,
+					`UPDATE approval_orders
+						SET review_source = 'system_auto'
+						WHERE review_notes LIKE '%approved due to system%'
+						  AND review_source = ''`,
+					`UPDATE approval_orders
+						SET review_source = 'admin_manual'
+						WHERE reviewer_id > 0
+						  AND review_source = ''
+						  AND status IN ('Approved', 'Rejected')`,
+				})
+			},
+			Rollback: func(tx *gorm.DB) error {
+				return runStatements(tx, []string{
+					`ALTER TABLE approval_orders
+						DROP COLUMN IF EXISTS agent_report,
+						DROP COLUMN IF EXISTS review_source`,
+				})
+			},
+		},
+		{
 			ID: "202512261300",
 			Migrate: func(tx *gorm.DB) error {
 				config := &model.CronJobConfig{
