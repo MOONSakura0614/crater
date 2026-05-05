@@ -40,6 +40,7 @@ crater-agent/__pycache__/
 crater-agent/src/**/__pycache__/
 crater-agent/src/**/*.py[cod]
 crater-agent/*.egg-info/
+crater-agent/src/*.egg-info/
 crater-agent/dist/
 crater-agent/results/
 crater-agent/logs/
@@ -48,6 +49,9 @@ crater-agent/tests/
 crater-agent/scripts/
 crater-agent/dataset/
 crater-agent/crater_bench/
+crater-agent/src/dataset/
+crater-agent/src/eval/
+crater-agent/src/res/
 crater-agent/crater_agent/dataset/
 crater-agent/crater_agent/eval/
 crater-agent/crater_agent/res/

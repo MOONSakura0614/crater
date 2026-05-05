@@ -22,12 +22,32 @@ dependencies = [
 requires = ["setuptools>=68.0"]
 build-backend = "setuptools.build_meta"
 
-[tool.setuptools.packages.find]
-where = ["src"]
-include = ["crater_agent*"]
+[tool.setuptools]
+package-dir = {"" = "src"}
+py-modules = [
+    "app",
+    "app_quality",
+    "config",
+    "internal_tools_router",
+    "paths",
+    "report_utils",
+    "scenarios",
+]
+packages = [
+    "agent",
+    "agents",
+    "llm",
+    "memory",
+    "orchestrators",
+    "pipeline",
+    "quality",
+    "runtime",
+    "skills",
+    "tools",
+]
 
 [tool.setuptools.package-data]
-crater_agent = ["skills/*.yaml"]
+skills = ["*.yaml"]
 
 [project.optional-dependencies]
 dev = [
