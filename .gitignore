@@ -48,6 +48,10 @@ crater-agent/tests/
 crater-agent/scripts/
 crater-agent/dataset/
 crater-agent/crater_bench/
+crater-agent/crater_agent/dataset/
+crater-agent/crater_agent/eval/
+crater-agent/crater_agent/res/
+/results/
 crater-agent/run_bench.py
 crater-agent/test_integration.py
 crater-agent/config/kubeconfig
