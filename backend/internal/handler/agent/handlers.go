@@ -1,7 +1,6 @@
 package agent
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -540,7 +539,7 @@ func (mgr *AgentMgr) DeleteSession(c *gin.Context) {
 }
 
 // GetAgentConfigSummary godoc
-// @Summary Get agent configuration summary for the current user
+// @Summary Get public agent configuration summary
 // @Tags agent
 // @Produce json
 // @Success 200 {object} resputil.Response[AgentConfigSummary]
@@ -557,6 +556,9 @@ func (mgr *AgentMgr) GetAgentConfigSummary(c *gin.Context) {
 		http.NoBody,
 	)
 	if err == nil {
+		if internalToken := mgr.getPythonAgentInternalToken(); internalToken != "" {
+			agentReq.Header.Set("X-Agent-Internal-Token", internalToken)
+		}
 		resp, requestErr := mgr.httpClient.Do(agentReq)
 		if requestErr == nil {
 			defer resp.Body.Close()
@@ -574,77 +576,6 @@ func (mgr *AgentMgr) GetAgentConfigSummary(c *gin.Context) {
 		}
 	}
 	resputil.Success(c, summary)
-}
-
-// HandleParameterUpdate godoc
-// @Summary Forward a parameter update to the Python Agent service
-// @Description Allows the frontend to send parameter adjustments (e.g. form field changes) to the agent mid-session.
-// @Tags agent
-// @Accept json
-// @Produce json
-// @Param request body map[string]any true "Parameter update payload"
-// @Success 200 {object} resputil.Response[any]
-// @Router /api/v1/agent/chat/parameter-update [post]
-func (mgr *AgentMgr) HandleParameterUpdate(c *gin.Context) {
-	var payload map[string]any
-	if err := c.ShouldBindJSON(&payload); err != nil {
-		resputil.BadRequestError(c, err.Error())
-		return
-	}
-
-	token := util.GetToken(c)
-	sessionID, _ := payload["sessionId"].(string)
-	if sessionID == "" {
-		resputil.BadRequestError(c, "sessionId is required")
-		return
-	}
-
-	if _, err := mgr.agentService.GetOwnedSession(c.Request.Context(), sessionID, token.UserID); err != nil {
-		resputil.HTTPError(c, http.StatusForbidden, "session not found", resputil.TokenInvalid)
-		return
-	}
-
-	bodyBytes, err := json.Marshal(payload)
-	if err != nil {
-		resputil.Error(c, fmt.Sprintf("failed to marshal payload: %v", err), resputil.NotSpecified)
-		return
-	}
-
-	agentURL := mgr.getPythonAgentURL() + "/chat/parameter-update"
-	agentReq, err := http.NewRequestWithContext(
-		c.Request.Context(),
-		http.MethodPost,
-		agentURL,
-		bytes.NewReader(bodyBytes),
-	)
-	if err != nil {
-		resputil.Error(c, fmt.Sprintf("failed to create agent request: %v", err), resputil.NotSpecified)
-		return
-	}
-	agentReq.Header.Set("Content-Type", "application/json")
-	if internalToken := mgr.getPythonAgentInternalToken(); internalToken != "" {
-		agentReq.Header.Set("X-Agent-Internal-Token", internalToken)
-	}
-
-	resp, err := mgr.httpClient.Do(agentReq)
-	if err != nil {
-		resputil.Error(c, fmt.Sprintf("agent service unavailable: %v", err), resputil.ServiceError)
-		return
-	}
-	defer resp.Body.Close()
-
-	var result any
-	if decodeErr := json.NewDecoder(resp.Body).Decode(&result); decodeErr != nil {
-		resputil.Error(c, fmt.Sprintf("failed to decode agent response: %v", decodeErr), resputil.NotSpecified)
-		return
-	}
-
-	if resp.StatusCode >= http.StatusBadRequest {
-		resputil.Error(c, fmt.Sprintf("agent service returned status %d", resp.StatusCode), resputil.ServiceError)
-		return
-	}
-
-	resputil.Success(c, result)
 }
 
 // GetSessionMessages godoc

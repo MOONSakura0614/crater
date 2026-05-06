@@ -243,11 +243,7 @@ export interface AgentFeedback {
 }
 
 export async function apiAdminListSessionFeedbacks(sessionId: string) {
-  // Admin reuses the protected endpoint since admins are also logged-in users;
-  // if the admin did not author the feedback, we need a dedicated admin endpoint later.
-  return apiV1Get<AgentFeedback[]>('agent/feedbacks', {
-    searchParams: { sessionId },
-  })
+  return apiV1Get<AgentFeedback[]>(`admin/agent/sessions/${sessionId}/feedbacks`)
 }
 
 export type AgentAuditSessionListResponse = IResponse<AgentAuditSessionListResult>

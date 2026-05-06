@@ -8,6 +8,7 @@ from fastapi import APIRouter, BackgroundTasks, Header, HTTPException
 from pydantic import BaseModel
 
 from config import settings
+from internal_auth import expected_internal_token, verify_internal_token
 from quality.analyzer import QualityAnalyzer
 
 logger = logging.getLogger(__name__)
@@ -17,7 +18,7 @@ router = APIRouter()
 def _get_analyzer() -> QualityAnalyzer:
     return QualityAnalyzer(
         backend_url=str(settings.crater_backend_url),
-        internal_token=settings.agent_internal_token,
+        internal_token=expected_internal_token(),
     )
 
 
@@ -50,7 +51,7 @@ async def trigger_quality_eval_from_feedback(
     x_agent_internal_token: Optional[str] = Header(default=None),
 ):
     """Internal endpoint: triggered by Go backend after user submits feedback."""
-    if x_agent_internal_token != settings.agent_internal_token:
+    if not verify_internal_token(x_agent_internal_token):
         raise HTTPException(status_code=401, detail="unauthorized")
 
     analyzer = _get_analyzer()
@@ -77,7 +78,7 @@ async def trigger_quality_eval_manual(
     x_agent_internal_token: Optional[str] = Header(default=None),
 ):
     """Manual trigger for single session quality evaluation."""
-    if x_agent_internal_token != settings.agent_internal_token:
+    if not verify_internal_token(x_agent_internal_token):
         raise HTTPException(status_code=401, detail="unauthorized")
 
     # For manual trigger, eval_id may be provided or we use 0 as sentinel

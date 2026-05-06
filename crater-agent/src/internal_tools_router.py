@@ -1,34 +1,19 @@
 from __future__ import annotations
 
-import os
 from typing import Any
 
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, Field
 
-from config import settings
+from internal_auth import verify_internal_token
 from tools.local_executor import LocalToolExecutor
 
 internal_tools_router = APIRouter()
 _local_write_executor = LocalToolExecutor()
 
 
-def _expected_internal_token() -> str:
-    explicit = str(os.getenv("CRATER_AGENT_AGENT_INTERNAL_TOKEN") or "").strip()
-    if explicit:
-        return explicit
-    shared = str(os.getenv("CRATER_AGENT_INTERNAL_TOKEN") or "").strip()
-    if shared:
-        return shared
-    backend_token = str(settings.crater_backend_internal_token or "").strip()
-    if backend_token:
-        return backend_token
-    return str(settings.agent_internal_token or "").strip()
-
-
 def _verify_internal_token(header_value: str) -> None:
-    expected = _expected_internal_token()
-    if not expected or header_value != expected:
+    if not verify_internal_token(header_value):
         raise HTTPException(status_code=403, detail="Invalid internal token")
 
 

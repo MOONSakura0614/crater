@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -47,7 +48,11 @@ func (mgr *AgentMgr) isInternalToolRequestAuthorized(c *gin.Context) bool {
 	if internalToken == "" {
 		return false
 	}
-	return c.GetHeader("X-Agent-Internal-Token") == internalToken
+	provided := strings.TrimSpace(c.GetHeader("X-Agent-Internal-Token"))
+	if provided == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(provided), []byte(internalToken)) == 1
 }
 
 func (mgr *AgentMgr) getSessionToken(ctx context.Context, session *model.AgentSession) (util.JWTMessage, error) {
@@ -145,6 +150,12 @@ func (mgr *AgentMgr) streamPythonAgentResponse(
 	}
 	agentReq.Header.Set("Content-Type", "application/json")
 	agentReq.Header.Set("Accept", "text/event-stream")
+	internalToken := mgr.getPythonAgentInternalToken()
+	if internalToken == "" {
+		resputil.Error(c, "python agent internal token is not configured", resputil.NotSpecified)
+		return
+	}
+	agentReq.Header.Set("X-Agent-Internal-Token", internalToken)
 
 	resp, err := mgr.httpClient.Do(agentReq)
 	if err != nil {

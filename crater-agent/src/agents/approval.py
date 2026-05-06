@@ -96,8 +96,8 @@ _APPROVAL_SYSTEM_PROMPT = """\
 这类作业用户来申请锁定本身就说明情况紧急。
 
 - 申请 < 48 小时：同普通轨道，直接 approve
-- 申请 ≥ 48 小时：使用 approve_emergency 先锁定 6h 保命，\
-  剩余时间转管理员审批
+- 申请 ≥ 48 小时：使用 approve_emergency 输出“如果工单仍是 Pending，就先锁 6h；如果管理员已处理，则只记录报告”的结果，\
+  不要覆盖人工审批结论
 
 ## 转交条件（无论哪个轨道）
 以下情况即使 < 48h 也应 escalate：
@@ -125,10 +125,10 @@ approve（直接通过）：
 {"verdict":"approve","confidence":0.8,"reason":"...",\
 "approved_hours":null,"user_message":"","admin_summary":""}
 
-approve_emergency（应急保命 6h + 剩余转管理员）：
+approve_emergency（应急处理，Pending 时会先锁 6h，已被人工处理则只记录报告）：
 {"verdict":"approve_emergency","confidence":0.7,"reason":"作业即将被清理...",\
-"approved_hours":6,"user_message":"已为您应急锁定6小时，剩余时间需管理员审批",\
-"admin_summary":"该作业即将被清理，Agent 已应急锁定 6h，用户原始申请 Xh，剩余 X-6h 待审批"}
+"approved_hours":6,"user_message":"Agent 已生成应急处理结果；若工单仍待处理，将先锁定 6h",\
+"admin_summary":"该作业即将被清理；若工单仍为 Pending，将先按 6h 锁定，其余时长仍待管理员处理"}
 
 escalate（转交管理员）：
 {"verdict":"escalate","confidence":0.6,"reason":"...",\

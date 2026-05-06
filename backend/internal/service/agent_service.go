@@ -578,6 +578,18 @@ func (s *AgentService) ListFeedbacks(ctx context.Context, sessionID string, user
 	return feedbacks, nil
 }
 
+// ListSessionFeedbacksForAdmin returns all feedbacks for a session without user scoping.
+func (s *AgentService) ListSessionFeedbacksForAdmin(ctx context.Context, sessionID string) ([]*model.AgentFeedback, error) {
+	var feedbacks []*model.AgentFeedback
+	if err := s.db.WithContext(ctx).
+		Where("session_id = ?", sessionID).
+		Order("created_at ASC").
+		Find(&feedbacks).Error; err != nil {
+		return nil, err
+	}
+	return feedbacks, nil
+}
+
 // FeedbackStats holds aggregated feedback statistics.
 type FeedbackStats struct {
 	Total         int64              `json:"total"`

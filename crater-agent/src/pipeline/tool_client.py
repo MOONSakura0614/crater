@@ -9,6 +9,7 @@ from uuid import uuid4
 import httpx
 
 from config import settings
+from internal_auth import expected_internal_token
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +69,7 @@ class PipelineToolClient:
                     "internal_context": PIPELINE_INTERNAL_CONTEXT,
                 },
                 headers={
-                    "X-Agent-Internal-Token": settings.crater_backend_internal_token,
+                    "X-Agent-Internal-Token": expected_internal_token(),
                     "Content-Type": "application/json",
                 },
             )

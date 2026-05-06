@@ -189,6 +189,31 @@ func (mgr *AgentMgr) GetAdminTurnEvents(c *gin.Context) {
 	resputil.Success(c, events)
 }
 
+// ListAdminSessionFeedbacks godoc
+// @Summary List all feedbacks for an agent session as admin
+// @Tags agent-admin
+// @Produce json
+// @Param sessionId path string true "Session ID (UUID)"
+// @Success 200 {object} resputil.Response[any]
+// @Router /api/v1/admin/agent/sessions/{sessionId}/feedbacks [get]
+func (mgr *AgentMgr) ListAdminSessionFeedbacks(c *gin.Context) {
+	sessionID := c.Param("sessionId")
+	if sessionID == "" {
+		resputil.BadRequestError(c, "sessionId is required")
+		return
+	}
+	if _, err := mgr.agentService.GetSession(c.Request.Context(), sessionID); err != nil {
+		resputil.HTTPError(c, http.StatusNotFound, "session not found", resputil.NotSpecified)
+		return
+	}
+	feedbacks, err := mgr.agentService.ListSessionFeedbacksForAdmin(c.Request.Context(), sessionID)
+	if err != nil {
+		resputil.Error(c, fmt.Sprintf("failed to list session feedbacks: %v", err), resputil.NotSpecified)
+		return
+	}
+	resputil.Success(c, feedbacks)
+}
+
 func (mgr *AgentMgr) authorizeInternalAuditRead(c *gin.Context) bool {
 	if mgr.isInternalToolRequestAuthorized(c) {
 		return true

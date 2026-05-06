@@ -8,7 +8,7 @@ from typing import Optional
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, Field
 
-from config import settings
+from internal_auth import verify_internal_token
 from pipeline.gpu_analyzer import run_gpu_audit
 from pipeline.ops_report import run_admin_ops_report
 from pipeline.storage_audit import run_storage_audit
@@ -106,7 +106,7 @@ async def gpu_audit(
     Requires a valid ``X-Agent-Internal-Token`` header that matches the
     configured backend internal token.
     """
-    if x_agent_internal_token != settings.crater_backend_internal_token:
+    if not verify_internal_token(x_agent_internal_token):
         raise HTTPException(status_code=403, detail="Invalid internal token")
 
     result = await run_gpu_audit(
@@ -128,7 +128,7 @@ async def admin_ops_report(
     x_agent_internal_token: str = Header(..., alias="X-Agent-Internal-Token"),
 ) -> AdminOpsReportResponse:
     """Run the scheduled admin ops report pipeline."""
-    if x_agent_internal_token != settings.crater_backend_internal_token:
+    if not verify_internal_token(x_agent_internal_token):
         raise HTTPException(status_code=403, detail="Invalid internal token")
 
     try:
@@ -164,7 +164,7 @@ async def storage_audit(
     x_agent_internal_token: str = Header(..., alias="X-Agent-Internal-Token"),
 ) -> StorageAuditResponse:
     """Run the scheduled storage audit pipeline."""
-    if x_agent_internal_token != settings.crater_backend_internal_token:
+    if not verify_internal_token(x_agent_internal_token):
         raise HTTPException(status_code=403, detail="Invalid internal token")
 
     try:

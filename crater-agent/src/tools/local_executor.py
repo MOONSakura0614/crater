@@ -313,6 +313,7 @@ class LocalToolExecutor:
         Returns False (deny) on any error — fail-closed.
         """
         from config import settings
+        from internal_auth import expected_internal_token
 
         if not pod_name or not user_id:
             return False
@@ -320,7 +321,7 @@ class LocalToolExecutor:
             resp = await self.client.get(
                 f"{settings.crater_backend_url}/api/agent/k8s-ownership",
                 params={"pod_name": pod_name, "user_id": str(user_id)},
-                headers={"X-Agent-Internal-Token": settings.crater_backend_internal_token},
+                headers={"X-Agent-Internal-Token": expected_internal_token()},
                 timeout=5.0,
             )
             if resp.status_code == 200:

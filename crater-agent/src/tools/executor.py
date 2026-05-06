@@ -14,6 +14,7 @@ from typing import Any, Protocol
 import httpx
 
 from config import settings
+from internal_auth import expected_internal_token
 from runtime.platform import route_for_tool
 from tools.definitions import (
     CONFIRM_TOOL_NAMES,
@@ -117,7 +118,7 @@ class GoBackendToolExecutor:
             resp = await self.client.post(
                 "/api/agent/tools/execute",
                 headers={
-                    "X-Agent-Internal-Token": settings.crater_backend_internal_token,
+                    "X-Agent-Internal-Token": expected_internal_token(),
                 },
                 json=request_body,
             )

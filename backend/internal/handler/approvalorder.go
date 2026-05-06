@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 	"k8s.io/klog/v2"
 	batch "volcano.sh/apis/pkg/apis/batch/v1alpha1"
 
@@ -21,6 +22,8 @@ import (
 	"github.com/raids-lab/crater/internal/util"
 	"github.com/raids-lab/crater/pkg/utils"
 )
+
+var errApprovalOrderNoLongerPending = errors.New("approval order is no longer pending")
 
 var errBackfillJobExtensionApprovalOrderUnsupported = errors.New(
 	"backfill jobs cannot create extension approval orders",
@@ -493,20 +496,6 @@ func (mgr *ApprovalOrderMgr) runAgentEvaluation(orderID uint, jobName string, ex
 		agentReport = string(reportJSON)
 	}
 
-	ao := query.ApprovalOrder
-
-	if result.Verdict == "approve" || result.Verdict == "approve_emergency" {
-		jobDB := query.Job
-		job, err := jobDB.WithContext(ctx).Where(jobDB.JobName.Eq(jobName)).First()
-		if err != nil || !mgr.isJobRunning(job.Status) {
-			klog.Warningf("job %s no longer running during agent eval for order %d", jobName, orderID)
-			_, _ = ao.WithContext(ctx).Where(ao.ID.Eq(orderID)).Updates(map[string]any{
-				"agent_report": agentReport,
-			})
-			return
-		}
-	}
-
 	switch result.Verdict {
 	case "approve":
 		lockHours := extensionHours
@@ -515,21 +504,31 @@ func (mgr *ApprovalOrderMgr) runAgentEvaluation(orderID uint, jobName string, ex
 			klog.Infof("agent adjusted lock hours for job %s: %d -> %d", jobName, extensionHours, lockHours)
 		}
 
-		if err := mgr.lockJobByCtx(ctx, jobName, lockHours); err != nil {
-			klog.Errorf("agent-approved lock failed for order %d (job %s): %v", orderID, jobName, err)
-			_, _ = ao.WithContext(ctx).Where(ao.ID.Eq(orderID)).Updates(map[string]any{
-				"agent_report": agentReport,
-			})
-			return
-		}
-
 		reviewNotes := fmt.Sprintf("agent evaluation approved (%d hours)", lockHours)
-		_, _ = ao.WithContext(ctx).Where(ao.ID.Eq(orderID)).Updates(map[string]any{
+		err := mgr.applyAgentApprovedOrder(ctx, orderID, jobName, lockHours, map[string]any{
 			"status":        string(model.ApprovalOrderStatusApproved),
 			"review_notes":  reviewNotes,
 			"review_source": string(model.ReviewSourceAgentAuto),
 			"agent_report":  agentReport,
 		})
+		if errors.Is(err, errApprovalOrderNoLongerPending) {
+			klog.Infof("skip agent approval result for order %d because it is no longer pending", orderID)
+			if rows, reportErr := mgr.recordAgentReport(ctx, orderID, agentReport); reportErr != nil {
+				klog.Warningf("failed to record stale agent approval report for order %d: %v", orderID, reportErr)
+			} else if rows > 0 {
+				klog.Infof("recorded stale agent approval report for order %d without changing manual decision", orderID)
+			}
+			return
+		}
+		if err != nil {
+			klog.Errorf("agent-approved order apply failed for order %d (job %s): %v", orderID, jobName, err)
+			if rows, reportErr := mgr.recordAgentReport(ctx, orderID, agentReport); reportErr != nil {
+				klog.Warningf("failed to record failed agent approval report for order %d: %v", orderID, reportErr)
+			} else if rows == 0 {
+				klog.Infof("skip failed agent approval report for order %d because no row was updated", orderID)
+			}
+			return
+		}
 		klog.Infof("agent approved order %d, locked job %s for %dh", orderID, jobName, lockHours)
 
 	case "approve_emergency":
@@ -537,36 +536,134 @@ func (mgr *ApprovalOrderMgr) runAgentEvaluation(orderID uint, jobName string, ex
 		if result.ApprovedHours != nil && *result.ApprovedHours > 0 {
 			emergencyHours = uint(*result.ApprovedHours)
 		}
-
-		if err := mgr.lockJobByCtx(ctx, jobName, emergencyHours); err != nil {
-			klog.Errorf("agent-emergency lock failed for order %d (job %s): %v", orderID, jobName, err)
-			_, _ = ao.WithContext(ctx).Where(ao.ID.Eq(orderID)).Updates(map[string]any{
-				"agent_report": agentReport,
-			})
+		remainingHours := uint(0)
+		if extensionHours > emergencyHours {
+			remainingHours = extensionHours - emergencyHours
+		}
+		emergencyNote := fmt.Sprintf(
+			"agent emergency lock applied: %dh; remaining %dh require manual review",
+			emergencyHours,
+			remainingHours,
+		)
+		err := mgr.applyAgentApprovedOrder(ctx, orderID, jobName, emergencyHours, map[string]any{
+			"review_notes": emergencyNote,
+			"agent_report": agentReport,
+		})
+		if errors.Is(err, errApprovalOrderNoLongerPending) {
+			klog.Infof("skip agent emergency result for order %d because it is no longer pending", orderID)
+			if rows, reportErr := mgr.recordAgentReport(ctx, orderID, agentReport); reportErr != nil {
+				klog.Warningf("failed to record stale agent emergency report for order %d: %v", orderID, reportErr)
+			} else if rows > 0 {
+				klog.Infof("recorded stale agent emergency report for order %d without changing manual decision", orderID)
+			}
 			return
 		}
-
-		_, _ = ao.WithContext(ctx).Where(ao.ID.Eq(orderID)).Updates(map[string]any{
-			"agent_report": agentReport,
-		})
-		klog.Infof("agent emergency-locked order %d, job %s for %dh, remaining %dh pending admin",
-			orderID, jobName, emergencyHours, extensionHours-emergencyHours)
+		if err != nil {
+			klog.Errorf("agent emergency lock failed for order %d (job %s): %v", orderID, jobName, err)
+			if rows, reportErr := mgr.recordAgentReport(ctx, orderID, agentReport); reportErr != nil {
+				klog.Warningf("failed to record failed agent emergency report for order %d: %v", orderID, reportErr)
+			} else if rows == 0 {
+				klog.Infof("skip failed agent emergency report for order %d because no row was updated", orderID)
+			}
+			return
+		}
+		klog.Infof("agent emergency-locked order %d (job %s): %dh locked, %dh remaining",
+			orderID, jobName, emergencyHours, remainingHours)
 
 	default: // "escalate"
-		_, _ = ao.WithContext(ctx).Where(ao.ID.Eq(orderID)).Updates(map[string]any{
-			"agent_report": agentReport,
-		})
+		if rows, err := mgr.recordAgentReport(ctx, orderID, agentReport); err != nil {
+			klog.Warningf("failed to record agent escalation report for order %d: %v", orderID, err)
+		} else if rows == 0 {
+			klog.Infof("skip agent escalation report for order %d because no row was updated", orderID)
+		}
 		klog.Infof("agent escalated order %d (job %s) to admin", orderID, jobName)
 	}
 }
 
-// lockJobByCtx 使用 context.Context 锁定作业，供异步 goroutine 使用。
-func (mgr *ApprovalOrderMgr) lockJobByCtx(ctx context.Context, jobName string, extensionHours uint) error {
-	jobDB := query.Job
+func (mgr *ApprovalOrderMgr) recordAgentReport(
+	ctx context.Context,
+	orderID uint,
+	agentReport string,
+) (int64, error) {
+	return mgr.recordAgentReportWithDB(ctx, query.GetDB(), orderID, agentReport)
+}
 
-	j, err := jobDB.WithContext(ctx).Where(jobDB.JobName.Eq(jobName)).First()
-	if err != nil {
+func (mgr *ApprovalOrderMgr) recordAgentReportWithDB(
+	ctx context.Context,
+	db *gorm.DB,
+	orderID uint,
+	agentReport string,
+) (int64, error) {
+	result := db.WithContext(ctx).
+		Model(&model.ApprovalOrder{}).
+		Where("id = ?", orderID).
+		Updates(map[string]any{
+			"agent_report": agentReport,
+		})
+	if result.Error != nil {
+		return 0, result.Error
+	}
+	return result.RowsAffected, nil
+}
+
+func (mgr *ApprovalOrderMgr) applyAgentApprovedOrder(
+	ctx context.Context,
+	orderID uint,
+	jobName string,
+	extensionHours uint,
+	orderUpdates map[string]any,
+) error {
+	return mgr.applyAgentApprovedOrderWithDB(ctx, query.GetDB(), orderID, jobName, extensionHours, orderUpdates)
+}
+
+func (mgr *ApprovalOrderMgr) applyAgentApprovedOrderWithDB(
+	ctx context.Context,
+	db *gorm.DB,
+	orderID uint,
+	jobName string,
+	extensionHours uint,
+	orderUpdates map[string]any,
+) error {
+	return db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var order model.ApprovalOrder
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("id = ? AND status = ?", orderID, string(model.ApprovalOrderStatusPending)).
+			First(&order).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return errApprovalOrderNoLongerPending
+			}
+			return err
+		}
+
+		if err := mgr.lockJobByTx(ctx, tx, jobName, extensionHours); err != nil {
+			return err
+		}
+
+		result := tx.WithContext(ctx).
+			Model(&model.ApprovalOrder{}).
+			Where("id = ? AND status = ?", orderID, string(model.ApprovalOrderStatusPending)).
+			Updates(orderUpdates)
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 0 {
+			return errApprovalOrderNoLongerPending
+		}
+		return nil
+	})
+}
+
+func (mgr *ApprovalOrderMgr) lockJobByTx(ctx context.Context, tx *gorm.DB, jobName string, extensionHours uint) error {
+	var j model.Job
+	if err := tx.WithContext(ctx).
+		Clauses(clause.Locking{Strength: "UPDATE"}).
+		Where("job_name = ?", jobName).
+		First(&j).Error; err != nil {
 		return err
+	}
+
+	if !mgr.isJobRunning(j.Status) {
+		return fmt.Errorf("job %s is no longer running", jobName)
 	}
 
 	if j.LockedTimestamp.Equal(utils.GetPermanentTime()) {
@@ -586,8 +683,15 @@ func (mgr *ApprovalOrderMgr) lockJobByCtx(ctx context.Context, jobName string, e
 	extensionDuration := time.Duration(extensionHours) * time.Hour
 	lockTime = lockTime.Add(extensionDuration)
 
-	if _, err := jobDB.WithContext(ctx).Where(jobDB.JobName.Eq(jobName)).Update(jobDB.LockedTimestamp, lockTime); err != nil {
-		return err
+	result := tx.WithContext(ctx).
+		Model(&model.Job{}).
+		Where("id = ?", j.ID).
+		Update("locked_timestamp", lockTime)
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return fmt.Errorf("job %s lock update affected no rows", jobName)
 	}
 
 	klog.Infof("async-locked job %s until %s", jobName, lockTime.Format("2006-01-02 15:04:05"))

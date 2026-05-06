@@ -176,7 +176,6 @@ func (mgr *AgentMgr) RegisterProtected(g *gin.RouterGroup) {
 	g.GET("/sessions/:sessionId/tool-calls", mgr.GetSessionToolCalls)
 	g.GET("/sessions/:sessionId/turns", mgr.GetSessionTurns)
 	g.GET("/turns/:turnId/events", mgr.GetTurnEvents)
-	g.POST("/chat/parameter-update", mgr.HandleParameterUpdate)
 
 	// Feedback
 	g.PUT("/feedbacks", mgr.UpsertFeedback)
@@ -202,6 +201,7 @@ func (mgr *AgentMgr) RegisterAdmin(g *gin.RouterGroup) {
 	g.GET("/sessions/:sessionId/messages", mgr.GetAdminSessionMessages)
 	g.GET("/sessions/:sessionId/tool-calls", mgr.GetAdminSessionToolCalls)
 	g.GET("/sessions/:sessionId/turns", mgr.GetAdminSessionTurns)
+	g.GET("/sessions/:sessionId/feedbacks", mgr.ListAdminSessionFeedbacks)
 	g.GET("/turns/:turnId/events", mgr.GetAdminTurnEvents)
 
 	// Manual quality eval trigger (added in Task 3)

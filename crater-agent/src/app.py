@@ -12,13 +12,14 @@ import json
 import logging
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
 from agents.approval import ApprovalAgent, ApprovalEvalRequest, ApprovalEvalResponse
 from app_quality import router as quality_router
 from config import settings
+from internal_auth import verify_internal_token
 from internal_tools_router import internal_tools_router
 from llm.client import ModelClientFactory
 from orchestrators.multi import MultiAgentOrchestrator
@@ -102,18 +103,28 @@ async def health():
     return {"status": "ok", "model": default_model}
 
 
+def _require_internal_token(header_value: str | None) -> None:
+    if not verify_internal_token(header_value):
+        raise HTTPException(status_code=403, detail="Invalid internal token")
+
+
 @app.get("/config-summary")
 async def config_summary():
     return settings.public_agent_config_summary()
 
 
 @app.post("/chat")
-async def chat(request: ChatRequest):
+async def chat(
+    request: ChatRequest,
+    x_agent_internal_token: str | None = Header(default=None, alias="X-Agent-Internal-Token"),
+):
     """Process a chat message and return SSE stream.
 
     The Go backend calls this endpoint with the user message and context.
     Returns Server-Sent Events with thinking, tool_call, tool_result, message events.
     """
+    _require_internal_token(x_agent_internal_token)
+
     async def event_generator():
         request_context = build_request_context(request)
         request.context = request_context
@@ -160,13 +171,19 @@ def _get_approval_agent() -> ApprovalAgent:
 
 
 @app.post("/evaluate/approval", response_model=ApprovalEvalResponse)
-async def evaluate_approval(request: ApprovalEvalRequest):
+async def evaluate_approval(
+    request: ApprovalEvalRequest,
+    x_agent_internal_token: str | None = Header(default=None, alias="X-Agent-Internal-Token"),
+):
     """Evaluate a job lock approval order.
 
     Called by Go backend as a synchronous hook during order creation.
     Returns structured verdict (approve/escalate). Never returns 5xx
     for evaluation logic failures — those are wrapped in an escalate verdict.
     """
+    if not verify_internal_token(x_agent_internal_token):
+        raise HTTPException(status_code=403, detail="Invalid internal token")
+
     logger.info(
         "[approval] received evaluation request: order=%d job=%s hours=%d user=%s session=%s",
         request.order_id, request.job_name, request.extension_hours,

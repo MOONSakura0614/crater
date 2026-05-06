@@ -24,7 +24,6 @@ export interface AgentSSEEvent {
     | 'tool_call_started'
     | 'tool_call_completed'
     | 'tool_call_confirmation_required'
-    | 'parameter_review'
     | 'resource_suggestion'
     | 'pipeline_report'
     | 'batch_confirmation'
@@ -157,27 +156,6 @@ export interface AgentChatRequest {
 
 export interface AgentResumeRequest {
   confirmId: string
-}
-
-export interface ParameterReviewPayload {
-  reviewId: string
-  scenario: string
-  complexity: 'simple' | 'complex'
-  step: number
-  totalSteps: number
-  title: string
-  description: string
-  parameters: Array<{
-    key: string
-    label: string
-    value: unknown
-    source: 'recommended' | 'default' | 'user'
-    editable: boolean
-    type: 'text' | 'number' | 'select' | 'textarea'
-    options?: Array<{ label: string; value: string }>
-    constraints?: { min?: number; max?: number }
-    hint?: string
-  }>
 }
 
 export interface ResourceSuggestionPayload {
@@ -609,19 +587,6 @@ export const apiGetAgentConfigSummary = () =>
 /**
  * Submit parameter review result (confirm or modify).
  */
-export const apiParameterUpdate = (
-  sessionId: string,
-  reviewId: string,
-  action: 'confirm' | 'modify',
-  parameters: Record<string, unknown>
-) =>
-  apiV1Post<IResponse<{ status: string }>>('agent/chat/parameter-update', {
-    session_id: sessionId,
-    review_id: reviewId,
-    action,
-    parameters,
-  })
-
 // ──────────────────────────────────────────────
 // Feedback
 // ──────────────────────────────────────────────

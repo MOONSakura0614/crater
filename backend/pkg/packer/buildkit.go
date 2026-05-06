@@ -169,13 +169,7 @@ func (b *imagePacker) generateBuildKitContainer(
 		{
 			Name:  "buildkit",
 			Image: config.GetConfig().Registry.BuildTools.Images.Buildx,
-			Command: []string{
-				setupCommands[0],
-				setupCommands[1],
-			},
-			Args: []string{
-				setupCommands[2],
-			},
+			Args:  setupCommands,
 			Env: []corev1.EnvVar{
 				{
 					Name:  "DOCKER_CONFIG",

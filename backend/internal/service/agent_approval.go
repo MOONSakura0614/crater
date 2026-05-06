@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -30,7 +32,7 @@ type ApprovalEvalRequest struct {
 
 // ApprovalEvalResponse is returned by the Python agent service.
 type ApprovalEvalResponse struct {
-	Verdict       string       `json:"verdict"` // "approve" or "escalate"
+	Verdict       string       `json:"verdict"` // "approve", "approve_emergency", or "escalate"
 	Confidence    float64      `json:"confidence"`
 	Reason        string       `json:"reason"`
 	ApprovedHours *int         `json:"approved_hours"` // agent-adjusted hours, nil = use original
@@ -50,6 +52,7 @@ type TraceEntry struct {
 type AgentApprovalEvaluator struct {
 	client    *http.Client
 	agentURL  string
+	token     string
 	timeout   time.Duration
 	semaphore chan struct{}
 
@@ -78,6 +81,14 @@ func NewAgentApprovalEvaluator() *AgentApprovalEvaluator {
 	agentURL := cfg.Agent.ServiceURL
 	if agentURL == "" {
 		agentURL = "http://localhost:8000"
+	}
+	internalToken := strings.TrimSpace(cfg.Agent.InternalToken)
+	if internalToken == "" {
+		internalToken = strings.TrimSpace(os.Getenv("CRATER_AGENT_INTERNAL_TOKEN"))
+	}
+	if internalToken == "" {
+		klog.Warningf("agent approval hook enabled but internal token is not configured; disabling approval hook")
+		return nil
 	}
 	klog.Infof("agent approval hook enabled, agentURL=%s", agentURL)
 
@@ -109,6 +120,7 @@ func NewAgentApprovalEvaluator() *AgentApprovalEvaluator {
 	return &AgentApprovalEvaluator{
 		client:           &http.Client{Timeout: timeout},
 		agentURL:         agentURL,
+		token:            internalToken,
 		timeout:          timeout,
 		semaphore:        make(chan struct{}, maxConcurrent),
 		maxPerMinute:     maxPerMin,
@@ -172,6 +184,9 @@ func (e *AgentApprovalEvaluator) doCall(ctx context.Context, req *ApprovalEvalRe
 		return nil, fmt.Errorf("create request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	if e.token != "" {
+		httpReq.Header.Set("X-Agent-Internal-Token", e.token)
+	}
 
 	resp, err := e.client.Do(httpReq)
 	if err != nil {

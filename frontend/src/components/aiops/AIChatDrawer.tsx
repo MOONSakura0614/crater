@@ -50,7 +50,6 @@ import {
   apiGetTurnEvents,
   apiListFeedbacks,
   apiListSessions,
-  apiParameterUpdate,
   apiPinSession,
   connectAgentChat,
   connectAgentResume,
@@ -65,7 +64,6 @@ import type {
   AgentToolCall,
   AgentTurn,
   BatchConfirmationPayload,
-  ParameterReviewPayload,
   PipelineReportPayload,
   ResourceSuggestionPayload,
 } from '@/services/api/agent'
@@ -85,7 +83,6 @@ import type { TimelineEvent } from './AgentTimeline'
 import { BatchConfirmCard } from './BatchConfirmCard'
 import { ConfirmActionCard } from './ConfirmActionCard'
 import { FeedbackCard } from './FeedbackCard'
-import { ParameterReviewCard } from './ParameterReviewCard'
 import { PipelineReportCard } from './PipelineReportCard'
 import { ResourceSuggestionCard } from './ResourceSuggestionCard'
 import { ThinkingIndicator } from './ThinkingIndicator'
@@ -118,7 +115,6 @@ type ConversationItemKind =
   | 'message'
   | 'tool_call'
   | 'confirmation_required'
-  | 'parameter_review'
   | 'resource_suggestion'
   | 'pipeline_report'
   | 'batch_confirmation'
@@ -156,8 +152,6 @@ interface ConversationItem {
   retryRequestId?: string
   /** For agent_event in single_agent (thinking update) */
   agentRole?: string
-  /** For 'parameter_review' */
-  parameterReview?: ParameterReviewPayload
   /** For 'resource_suggestion' */
   resourceSuggestion?: ResourceSuggestionPayload
   /** For 'pipeline_report' */
@@ -1596,21 +1590,6 @@ export function AIChatDrawer({ isOpen, onClose, currentJobName }: AIChatDrawerPr
           break
         }
 
-        case 'parameter_review': {
-          const payload = eventData as unknown as ParameterReviewPayload
-          clearThinkingItems()
-          setConversationItems((prev) => [
-            ...prev,
-            {
-              id: `param-review-${payload.reviewId || Date.now()}`,
-              kind: 'parameter_review',
-              parameterReview: payload,
-              timestamp: new Date(),
-            },
-          ])
-          break
-        }
-
         case 'resource_suggestion': {
           const payload = eventData as unknown as ResourceSuggestionPayload
           clearThinkingItems()
@@ -2121,6 +2100,30 @@ export function AIChatDrawer({ isOpen, onClose, currentJobName }: AIChatDrawerPr
         return
       }
 
+      const jobAffectingTools = new Set([
+        'resubmit_job',
+        'stop_job',
+        'delete_job',
+        'create_jupyter_job',
+        'create_webide_job',
+        'create_training_job',
+        'create_custom_job',
+        'create_pytorch_job',
+        'create_tensorflow_job',
+        'delete_pod',
+        'restart_workload',
+        'batch_stop_jobs',
+      ])
+      if (jobAffectingTools.has(normalizedTool)) {
+        void queryClient.invalidateQueries({ queryKey: ['job'] })
+        void queryClient.invalidateQueries({ queryKey: ['admin', 'tasklist', 'job'] })
+        void queryClient.invalidateQueries({ queryKey: ['context', 'quota'] })
+        void queryClient.invalidateQueries({ queryKey: ['context', 'job-resource-summary'] })
+        void queryClient.invalidateQueries({ queryKey: ['aitask', 'quota'] })
+        void queryClient.invalidateQueries({ queryKey: ['aitask', 'stats'] })
+        void queryClient.invalidateQueries({ queryKey: ['admin', 'gpu-analysis'] })
+      }
+
       const nodeAffectingTools = new Set([
         'cordon_node',
         'uncordon_node',
@@ -2132,6 +2135,32 @@ export function AIChatDrawer({ isOpen, onClose, currentJobName }: AIChatDrawerPr
       ])
       if (nodeAffectingTools.has(normalizedTool)) {
         void queryClient.invalidateQueries({ queryKey: ['overview', 'nodes'] })
+        void queryClient.invalidateQueries({ queryKey: ['nodes'] })
+        void queryClient.invalidateQueries({ queryKey: ['podResources'] })
+        void queryClient.invalidateQueries({ queryKey: ['job'] })
+        void queryClient.invalidateQueries({ queryKey: ['context', 'job-resource-summary'] })
+      }
+
+      const imageAffectingTools = new Set([
+        'create_image_build',
+        'manage_image_build',
+        'register_external_image',
+        'manage_image_access',
+      ])
+      if (imageAffectingTools.has(normalizedTool)) {
+        void queryClient.invalidateQueries({ queryKey: ['imagepack'] })
+        void queryClient.invalidateQueries({ queryKey: ['images'] })
+        void queryClient.invalidateQueries({ queryKey: ['cudaBaseImages'] })
+      }
+
+      const opsAuditAffectingTools = new Set([
+        'mark_audit_handled',
+        'batch_stop_jobs',
+        'notify_job_owner',
+      ])
+      if (opsAuditAffectingTools.has(normalizedTool)) {
+        void queryClient.invalidateQueries({ queryKey: ['ops-report'] })
+        void queryClient.invalidateQueries({ queryKey: ['admin', 'agent-audit'] })
       }
     },
     [queryClient]
@@ -2827,78 +2856,6 @@ export function AIChatDrawer({ isOpen, onClose, currentJobName }: AIChatDrawerPr
                                 `${item.confirmAction ?? '操作'} 已取消`
                               )
                             }}
-                          />
-                        </div>
-                      </div>
-                    )
-                  }
-
-                  if (item.kind === 'parameter_review' && item.parameterReview) {
-                    const pr = item.parameterReview
-                    return (
-                      <div key={item.id} className="flex min-w-0 justify-start">
-                        <div className="w-full max-w-[95%] min-w-0">
-                          <ParameterReviewCard
-                            reviewId={pr.reviewId}
-                            scenario={pr.scenario}
-                            complexity={pr.complexity}
-                            step={pr.step}
-                            totalSteps={pr.totalSteps}
-                            title={pr.title}
-                            description={pr.description}
-                            parameters={pr.parameters as ParameterReviewPayload['parameters']}
-                            onConfirm={(reviewId, parameters) => {
-                              apiParameterUpdate(
-                                lastLoadedAgentSessionIdRef.current ?? '',
-                                reviewId,
-                                'confirm',
-                                parameters
-                              )
-                              setConversationItems((prev) =>
-                                prev.map((ci) =>
-                                  ci.id === item.id
-                                    ? {
-                                        ...ci,
-                                        parameterReview: ci.parameterReview
-                                          ? {
-                                              ...ci.parameterReview,
-                                              _settled: 'confirmed' as const,
-                                            }
-                                          : ci.parameterReview,
-                                      }
-                                    : ci
-                                )
-                              )
-                            }}
-                            onModify={(reviewId, parameters) => {
-                              apiParameterUpdate(
-                                lastLoadedAgentSessionIdRef.current ?? '',
-                                reviewId,
-                                'modify',
-                                parameters
-                              )
-                              setConversationItems((prev) =>
-                                prev.map((ci) =>
-                                  ci.id === item.id
-                                    ? {
-                                        ...ci,
-                                        parameterReview: ci.parameterReview
-                                          ? {
-                                              ...ci.parameterReview,
-                                              _settled: 'confirmed' as const,
-                                            }
-                                          : ci.parameterReview,
-                                      }
-                                    : ci
-                                )
-                              )
-                            }}
-                            settled={
-                              (pr as ParameterReviewPayload & { _settled?: string })._settled ===
-                              'confirmed'
-                                ? 'confirmed'
-                                : null
-                            }
                           />
                         </div>
                       </div>

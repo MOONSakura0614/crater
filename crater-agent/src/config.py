@@ -44,8 +44,8 @@ class Settings(BaseSettings):
         default="", description="Shared token for Python Agent -> Go internal tool execution"
     )
     agent_internal_token: str = Field(
-        default="dev-agent-internal-token",
-        description="Internal token for Go backend authentication",
+        default="",
+        description="Legacy shared token alias; prefer CRATER_AGENT_INTERNAL_TOKEN",
     )
 
     # Agent Behavior
