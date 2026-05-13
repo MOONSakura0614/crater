@@ -13,61 +13,14 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-// 1. Import the "HttpResponse" class from the library.
-import { HttpResponse, http } from 'msw'
-
-import { AccessMode, IAuthResponse, ILogin, Role } from '@/services/api/auth'
-import { IResponse } from '@/services/types'
-
-import { logger } from '@/utils/loglevel'
+import type { RequestHandler } from 'msw'
 
 import { getDemoHandlers } from './demo'
 
-const baseURL = import.meta.env.VITE_SERVER_PROXY_BACKEND
-
-const baseHandlers = [
-  http.post<never, ILogin, IResponse<IAuthResponse>>(baseURL + `login`, async ({ request }) => {
-    const { username, password } = await request.json()
-    logger.info(`login with username: ${username}, password: ${password}`)
-    const mockUser = {
-      username: 'username',
-      password: '',
-      accessToken: '',
-      refreshToken: '',
-      role: Role.Admin,
-    }
-    // 成功登录，返回accessToken、refreshToken和role
-    return HttpResponse.json(
-      {
-        data: {
-          accessToken: mockUser.accessToken,
-          refreshToken: mockUser.refreshToken,
-          context: {
-            queue: '',
-            roleQueue: Role.Guest,
-            rolePlatform: Role.Guest,
-            accessQueue: AccessMode.NotAllowed,
-            accessPublic: AccessMode.NotAllowed,
-            space: '',
-          },
-          user: {
-            id: 0,
-            name: '',
-            nickname: '',
-          },
-          version: {
-            appVersion: 'mock-version',
-            commitSHA: 'mock-commit-sha',
-            buildType: 'development',
-            buildTime: '2025-01-01T00:00:00Z',
-          },
-        },
-        code: 0,
-        msg: '',
-      },
-      { status: 200 }
-    )
-  }),
-]
+// Base MSW handlers are intentionally empty: production builds do not load
+// MSW at all (gated by VITE_USE_MSW). The login handler that previously lived
+// here is now part of the demo handler set, which only activates when
+// VITE_DEMO_MODE=true (see ./demo/index.ts).
+const baseHandlers: RequestHandler[] = []
 
 export const handlers = [...baseHandlers, ...getDemoHandlers()]
