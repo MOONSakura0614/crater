@@ -113,10 +113,7 @@ export const authHandlers = [
   http.post(`${baseURL}api/v1/auth/switch`, ({ request }) => {
     const account = findAccountByToken(bearer(request))
     if (!account) {
-      return HttpResponse.json(
-        { code: 40101, msg: 'unauthorized', data: null },
-        { status: 401 }
-      )
+      return HttpResponse.json({ code: 40101, msg: 'unauthorized', data: null }, { status: 401 })
     }
     return HttpResponse.json({ code: 0, msg: '', data: userPayload(account) })
   }),

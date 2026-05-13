@@ -5,7 +5,7 @@ import { Role } from '@/services/api/auth'
 import { findAccountByToken } from '../accounts'
 import { DEMO_IMAGES } from '../fixtures/images'
 import { DEMO_JOBS, type DemoJob, findJob, jobsForOwner } from '../fixtures/jobs'
-import { DEMO_NODES, findNode, type DemoNode } from '../fixtures/nodes'
+import { DEMO_NODES, type DemoNode, findNode } from '../fixtures/nodes'
 import { DEMO_QUEUES } from '../fixtures/queues'
 import { DEMO_QUOTAS } from '../fixtures/quotas'
 
@@ -47,8 +47,20 @@ function toJobDetail(job: DemoJob) {
   const events =
     job.status === 'Failed'
       ? [
-          { reason: 'Scheduled', message: '调度到节点 gpu-node-01', count: 1, type: 'Normal', firstTimestamp: job.startedAt },
-          { reason: 'Pulled', message: 'Image pull completed', count: 1, type: 'Normal', firstTimestamp: job.startedAt },
+          {
+            reason: 'Scheduled',
+            message: '调度到节点 gpu-node-01',
+            count: 1,
+            type: 'Normal',
+            firstTimestamp: job.startedAt,
+          },
+          {
+            reason: 'Pulled',
+            message: 'Image pull completed',
+            count: 1,
+            type: 'Normal',
+            firstTimestamp: job.startedAt,
+          },
           {
             reason: 'OOMKilled',
             message: `Container terminated with exit code ${job.exitCode}: ${job.reason}`,
@@ -68,7 +80,13 @@ function toJobDetail(job: DemoJob) {
             },
           ]
         : [
-            { reason: 'Scheduled', message: '调度到节点 gpu-node-01', count: 1, type: 'Normal', firstTimestamp: job.startedAt },
+            {
+              reason: 'Scheduled',
+              message: '调度到节点 gpu-node-01',
+              count: 1,
+              type: 'Normal',
+              firstTimestamp: job.startedAt,
+            },
           ]
   return {
     name: job.name,
@@ -82,7 +100,11 @@ function toJobDetail(job: DemoJob) {
     createdAt: job.createdAt,
     startedAt: job.startedAt ?? '',
     completedAt: job.failedAt ?? '',
-    resources: { cpu: job.cpuRequest, memory: job.memoryRequest, 'nvidia.com/gpu': String(job.gpuRequest) },
+    resources: {
+      cpu: job.cpuRequest,
+      memory: job.memoryRequest,
+      'nvidia.com/gpu': String(job.gpuRequest),
+    },
     events,
     failureReason: job.reason ?? '',
     exitCode: job.exitCode,
@@ -97,11 +119,7 @@ function toNodeBrief(node: DemoNode) {
     role: 'worker',
     arch: 'amd64',
     status:
-      node.status === 'Degraded'
-        ? 'Occupied'
-        : node.status === 'NotReady'
-          ? 'NotReady'
-          : 'Ready',
+      node.status === 'Degraded' ? 'Occupied' : node.status === 'NotReady' ? 'NotReady' : 'Ready',
     vendor: node.gpuModel?.includes('NVIDIA') ? 'nvidia' : '',
     taints: node.taints?.map((t) => ({ key: t, value: '', effect: 'NoSchedule' })) ?? [],
     capacity: { cpu: node.cpuTotal, memory: node.memoryTotal, ...gpuCap },
@@ -172,9 +190,7 @@ export const peripheralHandlers = [
 
   // User's jobs (specific username)
   ...jobUrlMatchers(':url/user/:username').flatMap((url) => [
-    http.get(url, ({ params }) =>
-      ok(jobsForOwner(String(params.username)).map(toJobInfo))
-    ),
+    http.get(url, ({ params }) => ok(jobsForOwner(String(params.username)).map(toJobInfo))),
   ]),
 
   // Admin job list (with days filter)
@@ -198,9 +214,7 @@ export const peripheralHandlers = [
     }),
   ]),
 
-  ...jobUrlMatchers(':url/:name/pods').flatMap((url) => [
-    http.get(url, () => ok([])),
-  ]),
+  ...jobUrlMatchers(':url/:name/pods').flatMap((url) => [http.get(url, () => ok([]))]),
   ...jobUrlMatchers(':url/:name/yaml').flatMap((url) => [
     http.get(url, () => ok('# demo yaml omitted')),
   ]),
@@ -236,7 +250,11 @@ export const peripheralHandlers = [
             ip: '10.0.1.20',
             createTime: j.createdAt,
             status: j.status,
-            resources: { cpu: j.cpuRequest, memory: j.memoryRequest, 'nvidia.com/gpu': String(j.gpuRequest) },
+            resources: {
+              cpu: j.cpuRequest,
+              memory: j.memoryRequest,
+              'nvidia.com/gpu': String(j.gpuRequest),
+            },
             locked: false,
             permanentLocked: false,
             userName: j.owner,
@@ -256,7 +274,11 @@ export const peripheralHandlers = [
         ip: '10.0.1.20',
         createTime: j.createdAt,
         status: j.status,
-        resources: { cpu: j.cpuRequest, memory: j.memoryRequest, 'nvidia.com/gpu': String(j.gpuRequest) },
+        resources: {
+          cpu: j.cpuRequest,
+          memory: j.memoryRequest,
+          'nvidia.com/gpu': String(j.gpuRequest),
+        },
         locked: false,
         permanentLocked: false,
         userName: j.owner,
@@ -273,21 +295,22 @@ export const peripheralHandlers = [
     return ok({
       name: String(params.name),
       haveGPU: (node?.gpuTotal ?? 0) > 0,
-      devices: node && node.gpuTotal > 0
-        ? [
-            {
-              resourceName: 'nvidia.com/gpu',
-              label: node.gpuModel ?? '',
-              product: node.gpuModel ?? '',
-              vendorDomain: 'nvidia.com',
-              count: node.gpuTotal,
-              memory: '48Gi',
-              arch: 'Ada Lovelace',
-              driver: '535.183.01',
-              runtimeVersion: '12.4',
-            },
-          ]
-        : [],
+      devices:
+        node && node.gpuTotal > 0
+          ? [
+              {
+                resourceName: 'nvidia.com/gpu',
+                label: node.gpuModel ?? '',
+                product: node.gpuModel ?? '',
+                vendorDomain: 'nvidia.com',
+                count: node.gpuTotal,
+                memory: '48Gi',
+                arch: 'Ada Lovelace',
+                driver: '535.183.01',
+                runtimeVersion: '12.4',
+              },
+            ]
+          : [],
     })
   }),
 

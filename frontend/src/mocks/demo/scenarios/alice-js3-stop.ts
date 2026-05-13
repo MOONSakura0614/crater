@@ -37,15 +37,15 @@ export const aliceJs3Stop: Scenario = {
     }
     yield { delayMs: 400, frame: f.handoff('planner', 'explorer', '移交探索器先行验证') }
 
-    yield { delayMs: 500, frame: f.toolStart('get_job_detail', { name: 'stuck-job-7' }, 'tc-js3-1') }
+    yield {
+      delayMs: 500,
+      frame: f.toolStart('get_job_detail', { name: 'stuck-job-7' }, 'tc-js3-1'),
+    }
     yield {
       delayMs: 800,
-      frame: f.toolDone(
-        'get_job_detail',
-        'tc-js3-1',
-        'status=Running, 占用 4 GPU, 启动 14 小时',
-        { toolArgs: { name: 'stuck-job-7' } }
-      ),
+      frame: f.toolDone('get_job_detail', 'tc-js3-1', 'status=Running, 占用 4 GPU, 启动 14 小时', {
+        toolArgs: { name: 'stuck-job-7' },
+      }),
     }
     yield {
       delayMs: 400,
@@ -74,8 +74,20 @@ export const aliceJs3Stop: Scenario = {
           description: '停止后将立即释放 GPU 资源。建议保留 30 秒优雅终止时间以保存检查点。',
           submitLabel: '确认停止',
           fields: [
-            { key: 'job_name', label: '作业名', type: 'text', required: true, defaultValue: 'stuck-job-7' },
-            { key: 'reason', label: '停止原因（可选）', type: 'textarea', required: false, placeholder: '便于审计回溯' },
+            {
+              key: 'job_name',
+              label: '作业名',
+              type: 'text',
+              required: true,
+              defaultValue: 'stuck-job-7',
+            },
+            {
+              key: 'reason',
+              label: '停止原因（可选）',
+              type: 'textarea',
+              required: false,
+              placeholder: '便于审计回溯',
+            },
             {
               key: 'grace_period_seconds',
               label: '优雅终止（秒）',
@@ -90,7 +102,11 @@ export const aliceJs3Stop: Scenario = {
   },
   async *resume(ctx) {
     const decision =
-      (ctx.decisionPayload as { decision?: string; fields?: Record<string, unknown>; confirmed?: boolean }) ?? {}
+      (ctx.decisionPayload as {
+        decision?: string
+        fields?: Record<string, unknown>
+        confirmed?: boolean
+      }) ?? {}
     const rejected = decision.decision === 'reject' || decision.confirmed === false
 
     if (rejected) {
@@ -111,16 +127,18 @@ export const aliceJs3Stop: Scenario = {
 
     yield {
       delayMs: 400,
-      frame: f.toolStart('stop_job', { name: 'stuck-job-7', grace_period_seconds: grace }, 'tc-js3-stop-exec', 'executor'),
+      frame: f.toolStart(
+        'stop_job',
+        { name: 'stuck-job-7', grace_period_seconds: grace },
+        'tc-js3-stop-exec',
+        'executor'
+      ),
     }
     yield {
       delayMs: 1000,
-      frame: f.toolDone(
-        'stop_job',
-        'tc-js3-stop-exec',
-        `已发送停止信号，grace_period=${grace}s`,
-        { toolArgs: { name: 'stuck-job-7', grace_period_seconds: grace } }
-      ),
+      frame: f.toolDone('stop_job', 'tc-js3-stop-exec', `已发送停止信号，grace_period=${grace}s`, {
+        toolArgs: { name: 'stuck-job-7', grace_period_seconds: grace },
+      }),
     }
 
     yield { delayMs: 400, frame: f.handoff('executor', 'verifier', '执行完毕，移交验证器复核') }

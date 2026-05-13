@@ -1,11 +1,10 @@
-import { sleep } from './pacing'
 import type { Frame } from './frames'
+import { sleep } from './pacing'
 
 const encoder = new TextEncoder()
 
 function encode(frame: Frame): Uint8Array {
-  const dataLine =
-    typeof frame.data === 'string' ? frame.data : JSON.stringify(frame.data ?? {})
+  const dataLine = typeof frame.data === 'string' ? frame.data : JSON.stringify(frame.data ?? {})
   return encoder.encode(`event: ${frame.event}\ndata: ${dataLine}\n\n`)
 }
 

@@ -18,7 +18,15 @@ export interface DemoJob {
 }
 
 const idleOwners = ['bob', 'carol', 'dave', 'eve', 'frank', 'grace', 'henry'] as const
-const idleAccounts = ['cv-lab', 'cv-lab', 'rec-lab', 'rec-lab', 'nlp-lab', 'rl-lab', 'rl-lab'] as const
+const idleAccounts = [
+  'cv-lab',
+  'cv-lab',
+  'rec-lab',
+  'rec-lab',
+  'nlp-lab',
+  'rl-lab',
+  'rl-lab',
+] as const
 
 export const DEMO_JOBS: DemoJob[] = [
   {

@@ -25,7 +25,12 @@ const evalConfigs: DemoEvalConfig[] = [
     overallScore: 4.7,
     dimensions: [
       { key: 'relevance', label: '回答相关性', score: 4.9, comment: '直击 OOM 失败问题' },
-      { key: 'factual', label: '事实一致性', score: 4.8, comment: '退出码、显存峰值与工具结果一致' },
+      {
+        key: 'factual',
+        label: '事实一致性',
+        score: 4.8,
+        comment: '退出码、显存峰值与工具结果一致',
+      },
       { key: 'tool_use', label: '工具使用', score: 4.7, comment: '5 个工具构成完整证据链' },
       { key: 'risk_control', label: '风险控制', score: 4.5, comment: '无写操作' },
       { key: 'usability', label: '可用性', score: 4.6, comment: '三种修复方案对比清晰' },
@@ -99,9 +104,7 @@ export const DEMO_QUALITY_EVALS: AgentQualityEval[] = evalConfigs.map((cfg, i) =
     },
     chatModel: 'glm-4.6',
     chainModel: 'glm-4.6',
-    summary: cfg.dimensions
-      .map((d) => `${d.label} ${d.score.toFixed(1)}: ${d.comment}`)
-      .join('\n'),
+    summary: cfg.dimensions.map((d) => `${d.label} ${d.score.toFixed(1)}: ${d.comment}`).join('\n'),
     rawChatResp: { dimensions: cfg.dimensions },
     rawChainResp: null,
     artifactPath: undefined,

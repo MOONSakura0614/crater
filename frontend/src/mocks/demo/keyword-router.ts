@@ -1,4 +1,4 @@
-import { restrictedScenario, SCENARIOS } from './scenarios/registry'
+import { SCENARIOS, restrictedScenario } from './scenarios/registry'
 import type { DemoRole, Scenario } from './scenarios/types'
 
 function normalize(input: string): string {

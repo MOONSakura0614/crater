@@ -18,17 +18,13 @@ const REPORT: PipelineReportPayload = {
       action: '节点异常',
       severity: 'critical',
       count: 1,
-      items: [
-        { job_name: 'gpu-node-03', user: '-', gpu_util: 'Xid Error', duration: '14h' },
-      ],
+      items: [{ job_name: 'gpu-node-03', user: '-', gpu_util: 'Xid Error', duration: '14h' }],
     },
     {
       action: '排队拥塞',
       severity: 'warning',
       count: 1,
-      items: [
-        { job_name: 'gpu-l40s 队列', user: '-', gpu_util: '16/16', duration: 'pending=12' },
-      ],
+      items: [{ job_name: 'gpu-l40s 队列', user: '-', gpu_util: '16/16', duration: 'pending=12' }],
     },
     {
       action: 'GPU 利用率偏低',

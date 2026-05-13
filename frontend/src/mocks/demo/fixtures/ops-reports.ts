@@ -1,8 +1,4 @@
-import type {
-  OpsAuditItem,
-  OpsReportDetail,
-  OpsReportListItem,
-} from '@/services/api/ops-report'
+import type { OpsAuditItem, OpsReportDetail, OpsReportListItem } from '@/services/api/ops-report'
 
 const REPORT_ID = 'rpt-2026-05-13-001'
 
@@ -52,7 +48,11 @@ export const DEMO_OPS_REPORT_DETAIL: OpsReportDetail = {
     },
     failure_analysis: {
       categories: [
-        { reason: 'CUDA out of memory', count: 11, top_job: { name: 'nlp-train-001', owner: 'alice' } },
+        {
+          reason: 'CUDA out of memory',
+          count: 11,
+          top_job: { name: 'nlp-train-001', owner: 'alice' },
+        },
         { reason: 'Image pull backoff', count: 6, top_job: { name: 'cv-train-12', owner: 'bob' } },
         { reason: 'Node Xid error', count: 4, top_job: { name: 'rl-train-04', owner: 'henry' } },
         { reason: 'PVC mount failure', count: 3, top_job: { name: 'data-prep-09', owner: 'dave' } },

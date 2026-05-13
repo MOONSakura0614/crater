@@ -34,7 +34,10 @@ export const aliceJs2Failed: Scenario = {
     }
     yield { delayMs: 400, frame: f.handoff('planner', 'explorer', '移交探索器') }
 
-    yield { delayMs: 500, frame: f.toolStart('get_job_detail', { name: 'nlp-train-001' }, 'tc-js2-1') }
+    yield {
+      delayMs: 500,
+      frame: f.toolStart('get_job_detail', { name: 'nlp-train-001' }, 'tc-js2-1'),
+    }
     yield {
       delayMs: 900,
       frame: f.toolDone(
@@ -45,7 +48,10 @@ export const aliceJs2Failed: Scenario = {
       ),
     }
 
-    yield { delayMs: 400, frame: f.toolStart('get_job_events', { name: 'nlp-train-001' }, 'tc-js2-2') }
+    yield {
+      delayMs: 400,
+      frame: f.toolStart('get_job_events', { name: 'nlp-train-001' }, 'tc-js2-2'),
+    }
     yield {
       delayMs: 900,
       frame: f.toolDone(

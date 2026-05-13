@@ -43,7 +43,10 @@ export const adminAd2Node: Scenario = {
       ),
     }
 
-    yield { delayMs: 400, frame: f.toolStart('list_jobs_on_node', { node: 'gpu-node-03' }, 'tc-ad2-2') }
+    yield {
+      delayMs: 400,
+      frame: f.toolStart('list_jobs_on_node', { node: 'gpu-node-03' }, 'tc-ad2-2'),
+    }
     yield {
       delayMs: 800,
       frame: f.toolDone(
@@ -53,7 +56,10 @@ export const adminAd2Node: Scenario = {
       ),
     }
 
-    yield { delayMs: 400, frame: f.toolStart('get_node_events', { name: 'gpu-node-03' }, 'tc-ad2-3') }
+    yield {
+      delayMs: 400,
+      frame: f.toolStart('get_node_events', { name: 'gpu-node-03' }, 'tc-ad2-3'),
+    }
     yield {
       delayMs: 800,
       frame: f.toolDone(

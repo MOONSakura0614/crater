@@ -3,9 +3,9 @@ import { http } from 'msw'
 import { findAccountByToken } from '../accounts'
 import { pickScenario } from '../keyword-router'
 import { SCENARIOS } from '../scenarios/registry'
-import { f } from '../sse/frames'
-import { sseResponse, type Beat } from '../sse/stream'
 import { setPendingConfirm, takePendingConfirm } from '../session-store'
+import { f } from '../sse/frames'
+import { type Beat, sseResponse } from '../sse/stream'
 
 const baseURL = import.meta.env.VITE_SERVER_PROXY_BACKEND ?? ''
 
