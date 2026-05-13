@@ -21,9 +21,11 @@ import { IResponse } from '@/services/types'
 
 import { logger } from '@/utils/loglevel'
 
+import { getDemoHandlers } from './demo'
+
 const baseURL = import.meta.env.VITE_SERVER_PROXY_BACKEND
 
-export const handlers = [
+const baseHandlers = [
   http.post<never, ILogin, IResponse<IAuthResponse>>(baseURL + `login`, async ({ request }) => {
     const { username, password } = await request.json()
     logger.info(`login with username: ${username}, password: ${password}`)
@@ -67,3 +69,5 @@ export const handlers = [
     )
   }),
 ]
+
+export const handlers = [...baseHandlers, ...getDemoHandlers()]
