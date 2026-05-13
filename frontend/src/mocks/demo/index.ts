@@ -5,6 +5,7 @@ import { agentAuditHandlers } from './handlers/agent-audit'
 import { agentRestHandlers } from './handlers/agent-rest'
 import { agentSseHandlers } from './handlers/agent-sse'
 import { aiopsHandlers } from './handlers/aiops'
+import { approvalOrderHandlers } from './handlers/approval-orders'
 import { authHandlers } from './handlers/auth'
 import { catchallHandlers } from './handlers/catchall'
 import { opsReportHandlers } from './handlers/ops-report'
@@ -21,6 +22,7 @@ export function getDemoHandlers(): RequestHandler[] {
     ...opsReportHandlers,
     ...agentAuditHandlers,
     ...agentRestHandlers,
+    ...approvalOrderHandlers,
     ...peripheralHandlers,
     ...catchallHandlers,
   ]

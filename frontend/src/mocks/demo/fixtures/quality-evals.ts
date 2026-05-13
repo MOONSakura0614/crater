@@ -82,37 +82,150 @@ const evalConfigs: DemoEvalConfig[] = [
   },
 ]
 
-export const DEMO_QUALITY_EVALS: AgentQualityEval[] = evalConfigs.map((cfg, i) => {
-  const bundle = DEMO_AGENT_SESSIONS.find((b) => b.session.sessionId === cfg.sessionId)
-  return {
-    id: 100 + i,
-    sessionId: cfg.sessionId,
-    turnId: bundle?.turns[0].turnId,
+type EvalShape = Pick<
+  AgentQualityEval,
+  'evalScope' | 'evalType' | 'triggerSource' | 'evalStatus' | 'chatModel' | 'chainModel'
+>
+
+interface EvalVariant extends EvalShape {
+  idOffset: number
+  /** 1.0 = baseline; other values scale overall score */
+  scoreScale: number
+  summaryNote: string
+}
+
+const evalVariants: EvalVariant[] = [
+  {
+    idOffset: 100,
     evalScope: 'session',
     evalType: 'full',
-    targetId: cfg.sessionId,
-    feedbackId: null,
     triggerSource: 'manual',
     evalStatus: 'completed',
-    chatScores: {
-      overall: cfg.overallScore,
-      dimensions: Object.fromEntries(cfg.dimensions.map((d) => [d.key, d.score])),
-    },
-    chainScores: {
-      overall: cfg.overallScore - 0.05,
-      tool_chain_quality: cfg.dimensions.find((d) => d.key === 'tool_use')?.score,
-    },
     chatModel: 'glm-4.6',
     chainModel: 'glm-4.6',
-    summary: cfg.dimensions.map((d) => `${d.label} ${d.score.toFixed(1)}: ${d.comment}`).join('\n'),
-    rawChatResp: { dimensions: cfg.dimensions },
-    rawChainResp: null,
-    artifactPath: undefined,
-    metadata: { dimensions: cfg.dimensions },
-    createdAt: bundle?.session.updatedAt ?? '2026-05-13T08:00:00Z',
-    completedAt: bundle?.session.updatedAt ?? '2026-05-13T08:00:00Z',
-    updatedAt: bundle?.session.updatedAt ?? '2026-05-13T08:00:00Z',
-  }
+    scoreScale: 1.0,
+    summaryNote: '会话级全维度评估（Full）：覆盖对话质量、工具链、风险控制三大类。',
+  },
+  {
+    idOffset: 200,
+    evalScope: 'session',
+    evalType: 'dialogue',
+    triggerSource: 'offline_batch',
+    evalStatus: 'completed',
+    chatModel: 'qwen-max-latest',
+    chainModel: '',
+    scoreScale: 1.03,
+    summaryNote:
+      '会话级对话质量评估（Dialogue）：关注表达清晰度、上下文一致性、可读性，离线批跑产出。',
+  },
+  {
+    idOffset: 300,
+    evalScope: 'session',
+    evalType: 'task',
+    triggerSource: 'feedback',
+    evalStatus: 'completed',
+    chatModel: '',
+    chainModel: 'glm-4.6',
+    scoreScale: 0.98,
+    summaryNote:
+      '会话级任务执行评估（Task）：关注工具链合理性、证据充分性、操作合规性，由用户反馈触发。',
+  },
+  {
+    idOffset: 400,
+    evalScope: 'turn',
+    evalType: 'full',
+    triggerSource: 'manual',
+    evalStatus: 'completed',
+    chatModel: 'glm-4.6',
+    chainModel: 'glm-4.6',
+    scoreScale: 0.95,
+    summaryNote: '轮次级全维度评估（Turn / Full）：粒度更细，聚焦本轮入口判断与结论形成。',
+  },
+]
+
+// Generate matrix of (session × variant). Skip combinations where it would be
+// noisy (e.g. dialogue eval on the very-short JS-1). This gives the admin
+// quality-eval list real diversity for screenshots.
+export const DEMO_QUALITY_EVALS: AgentQualityEval[] = evalConfigs.flatMap((cfg, cfgIdx) =>
+  evalVariants
+    .filter((variant) => {
+      // The fallback-style short sessions skip the dialogue eval to add diversity.
+      if (cfg.sessionId === 'sess-alice-js1' && variant.evalType === 'dialogue') return false
+      return true
+    })
+    .map((variant) => {
+      const bundle = DEMO_AGENT_SESSIONS.find((b) => b.session.sessionId === cfg.sessionId)
+      const overall = Number((cfg.overallScore * variant.scoreScale).toFixed(2))
+      const dimensions = cfg.dimensions.map((d) => ({
+        ...d,
+        score: Number(Math.min(5, d.score * variant.scoreScale).toFixed(2)),
+      }))
+      return {
+        id: variant.idOffset + cfgIdx,
+        sessionId: cfg.sessionId,
+        turnId: bundle?.turns[0].turnId,
+        evalScope: variant.evalScope,
+        evalType: variant.evalType,
+        targetId:
+          variant.evalScope === 'turn' ? (bundle?.turns[0].turnId ?? cfg.sessionId) : cfg.sessionId,
+        feedbackId: variant.triggerSource === 'feedback' ? 1 : null,
+        triggerSource: variant.triggerSource,
+        evalStatus: variant.evalStatus,
+        chatScores:
+          variant.chatModel !== ''
+            ? {
+                overall,
+                dimensions: Object.fromEntries(dimensions.map((d) => [d.key, d.score])),
+              }
+            : undefined,
+        chainScores:
+          variant.chainModel !== ''
+            ? {
+                overall: Number((overall - 0.05).toFixed(2)),
+                tool_chain_quality: dimensions.find((d) => d.key === 'tool_use')?.score,
+                risk_control: dimensions.find((d) => d.key === 'risk_control')?.score,
+              }
+            : undefined,
+        chatModel: variant.chatModel,
+        chainModel: variant.chainModel,
+        summary:
+          variant.summaryNote +
+          '\n\n' +
+          dimensions.map((d) => `${d.label} ${d.score.toFixed(1)}: ${d.comment}`).join('\n'),
+        rawChatResp: { dimensions, overall, variantType: variant.evalType },
+        rawChainResp: null,
+        artifactPath: undefined,
+        metadata: { dimensions, variantType: variant.evalType, variantScope: variant.evalScope },
+        createdAt: bundle?.session.updatedAt ?? '2026-05-13T08:00:00Z',
+        completedAt: bundle?.session.updatedAt ?? '2026-05-13T08:00:00Z',
+        updatedAt: bundle?.session.updatedAt ?? '2026-05-13T08:00:00Z',
+      } satisfies AgentQualityEval
+    })
+)
+
+// One in-progress eval to demonstrate the "running" badge during recording.
+DEMO_QUALITY_EVALS.unshift({
+  id: 999,
+  sessionId: 'sess-admin-ad3',
+  turnId: undefined,
+  evalScope: 'session',
+  evalType: 'task',
+  targetId: 'sess-admin-ad3',
+  feedbackId: null,
+  triggerSource: 'manual',
+  evalStatus: 'running',
+  chatScores: undefined,
+  chainScores: undefined,
+  chatModel: 'glm-4.6',
+  chainModel: 'glm-4.6',
+  summary: '评估进行中：正在分析批量停止场景的工具链合规性与风险控制流程……',
+  rawChatResp: null,
+  rawChainResp: null,
+  artifactPath: undefined,
+  metadata: { stage: 'tool_chain_analysis', progress: 0.42 },
+  createdAt: new Date(Date.now() - 90_000).toISOString(),
+  completedAt: null,
+  updatedAt: new Date(Date.now() - 30_000).toISOString(),
 })
 
 export function evalsForSession(sessionId: string): AgentQualityEval[] {
