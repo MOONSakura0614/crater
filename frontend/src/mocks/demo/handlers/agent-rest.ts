@@ -3,7 +3,7 @@ import { HttpResponse, http } from 'msw'
 import { findAccountByToken } from '../accounts'
 import { DEMO_AGENT_SESSIONS, findSessionBundle, sessionsForRole } from '../fixtures/agent-sessions'
 
-const baseURL = '*/'
+const baseURL = '/'
 
 function ok<T>(data: T) {
   return HttpResponse.json({ code: 0, msg: '', data })

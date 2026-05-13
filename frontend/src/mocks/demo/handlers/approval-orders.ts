@@ -3,7 +3,7 @@ import { HttpResponse, http } from 'msw'
 import { findAccountByToken } from '../accounts'
 import { DEMO_APPROVAL_ORDERS, findOrder, ordersForUser } from '../fixtures/approval-orders'
 
-const baseURL = '*/'
+const baseURL = '/'
 
 function ok<T>(data: T) {
   return HttpResponse.json({ code: 0, msg: '', data })

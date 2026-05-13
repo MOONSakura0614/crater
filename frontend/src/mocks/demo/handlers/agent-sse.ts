@@ -7,7 +7,7 @@ import { setPendingConfirm, takePendingConfirm } from '../session-store'
 import { f } from '../sse/frames'
 import { type Beat, sseResponse } from '../sse/stream'
 
-const baseURL = '*/'
+const baseURL = '/'
 
 interface ChatBody {
   sessionId: string | null

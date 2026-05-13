@@ -4,7 +4,7 @@ import { DEMO_AGENT_SESSIONS, findSessionBundle } from '../fixtures/agent-sessio
 import { demoAuditDetail, demoAuditSessionsResult } from '../fixtures/audit-sessions'
 import { DEMO_QUALITY_EVALS, evalsForSession } from '../fixtures/quality-evals'
 
-const baseURL = '*/'
+const baseURL = '/'
 
 function ok<T>(data: T) {
   return HttpResponse.json({ code: 0, msg: '', data })
