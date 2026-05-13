@@ -1,6 +1,6 @@
 import { HttpResponse, http } from 'msw'
 
-const baseURL = import.meta.env.VITE_SERVER_PROXY_BACKEND ?? ''
+const baseURL = '*/'
 
 // Generic 200-empty fallback for any v1 GET/POST/PUT/DELETE so unrouted page
 // reads don't 500. MUST come last in the handler array (MSW matches in order,

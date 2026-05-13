@@ -5,7 +5,7 @@ import type { IDiagnosis } from '@/services/api/aiops'
 import { DEMO_HEALTH_ADMIN, DEMO_HEALTH_USER } from '../fixtures/health'
 import { findJob } from '../fixtures/jobs'
 
-const baseURL = import.meta.env.VITE_SERVER_PROXY_BACKEND ?? ''
+const baseURL = '*/'
 
 function ok<T>(data: T) {
   return HttpResponse.json({ code: 0, msg: '', data })

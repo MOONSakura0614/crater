@@ -3,7 +3,7 @@ import { HttpResponse, http } from 'msw'
 import { findAccountByToken } from '../accounts'
 import { DEMO_AGENT_SESSIONS, findSessionBundle, sessionsForRole } from '../fixtures/agent-sessions'
 
-const baseURL = import.meta.env.VITE_SERVER_PROXY_BACKEND ?? ''
+const baseURL = '*/'
 
 function ok<T>(data: T) {
   return HttpResponse.json({ code: 0, msg: '', data })

@@ -6,7 +6,7 @@ import {
   DEMO_OPS_REPORT_LIST,
 } from '../fixtures/ops-reports'
 
-const baseURL = import.meta.env.VITE_SERVER_PROXY_BACKEND ?? ''
+const baseURL = '*/'
 
 export const opsReportHandlers = [
   http.get(`${baseURL}api/v1/admin/agent/ops-reports`, ({ request }) => {

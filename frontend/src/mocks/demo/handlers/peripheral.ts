@@ -9,7 +9,7 @@ import { DEMO_NODES, type DemoNode, findNode } from '../fixtures/nodes'
 import { DEMO_QUEUES } from '../fixtures/queues'
 import { DEMO_QUOTAS } from '../fixtures/quotas'
 
-const baseURL = import.meta.env.VITE_SERVER_PROXY_BACKEND ?? ''
+const baseURL = '*/'
 
 function ok<T>(data: T) {
   return HttpResponse.json({ code: 0, msg: '', data })

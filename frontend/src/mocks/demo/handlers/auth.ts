@@ -12,7 +12,7 @@ import {
 } from '../accounts'
 import { setActiveUser } from '../session-store'
 
-const baseURL = import.meta.env.VITE_SERVER_PROXY_BACKEND ?? ''
+const baseURL = '*/'
 
 function userPayload(account: (typeof DEMO_ACCOUNTS)[number]): IAuthResponse {
   return {
