@@ -53,7 +53,18 @@ async function enableMocking() {
 
   // `worker.start()` returns a Promise that resolves
   // once the Service Worker is up and ready to intercept requests.
-  return worker.start()
+  return worker.start({
+    // Silently pass through requests we don't mock (vite HMR, /src/*, /node_modules/*, etc.)
+    // — otherwise MSW emits a warn-level log for every internal request and slows things down.
+    onUnhandledRequest: 'bypass',
+    // Use a quiet log to avoid noise when iterating during recording.
+    quiet: false,
+    serviceWorker: {
+      url: '/mockServiceWorker.js',
+      // Force re-register on every page load so stale SW from previous demo runs gets replaced.
+      options: { scope: '/' },
+    },
+  })
 }
 
 enableMocking()

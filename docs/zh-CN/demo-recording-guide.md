@@ -10,12 +10,24 @@ npm install              # 第一次需要
 npm run dev:demo         # 启动 vite --mode demo，监听 5183
 ```
 
-打开 Chrome 隐身窗口 `http://localhost:5183`。
+**强烈建议使用 Chrome 隐身窗口** 打开 `http://localhost:5183`，避免旧 Service Worker / localStorage 残留。
 
-> **录制前的小动作**
-> - 在浏览器控制台执行 `localStorage.clear()` 保证会话状态干净；
-> - 节奏控制：`localStorage.setItem('demo.pacing', 'NORMAL')`（可选 `FAST` / `NORMAL` / `SLOW`），刷新生效；
-> - 关闭其它标签页里的旧前端（避免被 Service Worker 复用旧 handler）。
+### 1.1 首次启动 / 之前启动过失败版本时的清理步骤
+
+如果**之前启动过失败版本的 demo**（比如旧 SW 还残留），第一次进入会看到 `Failed to fetch dynamically imported module` 或一片空白报错。按下面 3 步清理：
+
+1. **DevTools → Application → Service Workers**，找到 `mockServiceWorker.js` 点 **Unregister**
+2. **Application → Storage → Clear site data**（一键清空所有 cache + localStorage + SW）
+3. **关闭所有 5183 端口的标签页**，重新打开隐身窗口访问
+
+之后每次切换 demo 数据集 / 重启 vite 时，只需 **硬刷新**（`Cmd+Shift+R` / `Ctrl+Shift+R`），新 SW 会立即接管。
+
+### 1.2 录制前的小动作
+
+- 在浏览器控制台执行 `localStorage.clear()` 保证会话状态干净；
+- 节奏控制：`localStorage.setItem('demo.pacing', 'NORMAL')`（可选 `FAST` / `NORMAL` / `SLOW`），刷新生效；
+- 关闭其它标签页里的旧前端，避免被 Service Worker 复用旧 handler；
+- DevTools → Network 面板**勾选 "Disable cache"**，避免 chunk 缓存导致 import 失败。
 
 ### MSW 是什么？
 
@@ -168,12 +180,14 @@ npm run dev:demo         # 启动 vite --mode demo，监听 5183
 
 | 现象 | 处理 |
 |---|---|
+| **进入首页直接 `Failed to fetch dynamically imported module: .../src/routes/...`** | 旧 Service Worker 残留。**Application → Storage → Clear site data**（一键清空），关闭所有 5183 标签后重开。详见 §1.1 |
 | 登录后白屏 / 401 反复 | DevTools → Application → Service Workers，确认 `mockServiceWorker.js` 状态为 activated；若否，硬刷新（Cmd+Shift+R） |
 | 输入 chat 后无 SSE | DevTools → Network 找 `/v1/agent/chat`，确认 Status=200 + "(ServiceWorker)" 标记；若是真实 502/CORS，说明 demo 模式未生效，检查启动脚本是否用了 `dev:demo` |
 | 节奏过快/过慢 | 控制台 `localStorage.setItem('demo.pacing','SLOW')` 后刷新 |
 | ConfirmCard 不弹出 | 检查关键词触发的是 JS-3/AD-3 而非 JS-1/JS-2；fallback / pending 诊断不会弹出确认 |
 | 历史会话不见 | 切换账号后刷新；登出再登入会清 `crater.demo.user` |
 | 端口被占 | 默认 5183，被占可改 `package.json` 的 dev:demo `--port` 参数 |
+| **chunk 加载错乱 / 模块找不到** | 等同上面"动态 import 失败"的处理，Clear site data 后重试。一般是 vite 重启后旧 SW 又拿着旧的 chunk URL |
 
 ## 7. 录制完关闭 demo 模式
 
