@@ -1,0 +1,117 @@
+import type { AgentQualityEval } from '@/services/api/admin/agentAudit'
+
+import { DEMO_AGENT_SESSIONS } from './agent-sessions'
+
+interface DemoEvalConfig {
+  sessionId: string
+  overallScore: number
+  dimensions: Array<{ key: string; label: string; score: number; comment: string }>
+}
+
+const evalConfigs: DemoEvalConfig[] = [
+  {
+    sessionId: 'sess-alice-js1',
+    overallScore: 4.5,
+    dimensions: [
+      { key: 'relevance', label: '回答相关性', score: 4.7, comment: '紧扣排队问题，未发散' },
+      { key: 'factual', label: '事实一致性', score: 4.6, comment: '队列容量、配额与工具结果一致' },
+      { key: 'tool_use', label: '工具使用', score: 4.5, comment: '4 个证据工具覆盖全面' },
+      { key: 'risk_control', label: '风险控制', score: 4.4, comment: '未触发写操作' },
+      { key: 'usability', label: '可用性', score: 4.3, comment: '建议具体，但缺少时间估计' },
+    ],
+  },
+  {
+    sessionId: 'sess-alice-js2',
+    overallScore: 4.7,
+    dimensions: [
+      { key: 'relevance', label: '回答相关性', score: 4.9, comment: '直击 OOM 失败问题' },
+      { key: 'factual', label: '事实一致性', score: 4.8, comment: '退出码、显存峰值与工具结果一致' },
+      { key: 'tool_use', label: '工具使用', score: 4.7, comment: '5 个工具构成完整证据链' },
+      { key: 'risk_control', label: '风险控制', score: 4.5, comment: '无写操作' },
+      { key: 'usability', label: '可用性', score: 4.6, comment: '三种修复方案对比清晰' },
+    ],
+  },
+  {
+    sessionId: 'sess-alice-js3',
+    overallScore: 4.6,
+    dimensions: [
+      { key: 'relevance', label: '回答相关性', score: 4.6, comment: '匹配停止意图' },
+      { key: 'factual', label: '事实一致性', score: 4.7, comment: '执行前后状态对照清晰' },
+      { key: 'tool_use', label: '工具使用', score: 4.5, comment: '前置 + 执行 + 验证三段式合规' },
+      { key: 'risk_control', label: '风险控制', score: 4.8, comment: '弹出确认卡，记录审计' },
+      { key: 'usability', label: '可用性', score: 4.4, comment: '可补充释放资源的可视化' },
+    ],
+  },
+  {
+    sessionId: 'sess-admin-ad1',
+    overallScore: 4.8,
+    dimensions: [
+      { key: 'relevance', label: '回答相关性', score: 4.8, comment: '5 步巡检覆盖完整' },
+      { key: 'factual', label: '事实一致性', score: 4.9, comment: 'pipeline 报告与工具结果对齐' },
+      { key: 'tool_use', label: '工具使用', score: 4.8, comment: '健康/节点/队列/空跑/失败齐全' },
+      { key: 'risk_control', label: '风险控制', score: 4.5, comment: '未触发写操作' },
+      { key: 'usability', label: '可用性', score: 4.9, comment: '优先级建议明确' },
+    ],
+  },
+  {
+    sessionId: 'sess-admin-ad2',
+    overallScore: 4.6,
+    dimensions: [
+      { key: 'relevance', label: '回答相关性', score: 4.7, comment: '精确锁定 gpu-node-03' },
+      { key: 'factual', label: '事实一致性', score: 4.8, comment: '4 个独立来源互证 Xid 79' },
+      { key: 'tool_use', label: '工具使用', score: 4.6, comment: 'Prometheus 引入有效' },
+      { key: 'risk_control', label: '风险控制', score: 4.5, comment: '保留 cordon 决策给管理员' },
+      { key: 'usability', label: '可用性', score: 4.5, comment: '建议步骤具体' },
+    ],
+  },
+  {
+    sessionId: 'sess-admin-ad3',
+    overallScore: 4.7,
+    dimensions: [
+      { key: 'relevance', label: '回答相关性', score: 4.6, comment: '匹配批量清理意图' },
+      { key: 'factual', label: '事实一致性', score: 4.8, comment: '检出与执行一致' },
+      { key: 'tool_use', label: '工具使用', score: 4.7, comment: '批量执行细粒度' },
+      { key: 'risk_control', label: '风险控制', score: 4.9, comment: '批量确认卡 + 用户勾选' },
+      { key: 'usability', label: '可用性', score: 4.6, comment: 'GPU·h 回收量明确' },
+    ],
+  },
+]
+
+export const DEMO_QUALITY_EVALS: AgentQualityEval[] = evalConfigs.map((cfg, i) => {
+  const bundle = DEMO_AGENT_SESSIONS.find((b) => b.session.sessionId === cfg.sessionId)
+  return {
+    id: 100 + i,
+    sessionId: cfg.sessionId,
+    turnId: bundle?.turns[0].turnId,
+    evalScope: 'session',
+    evalType: 'full',
+    targetId: cfg.sessionId,
+    feedbackId: null,
+    triggerSource: 'manual',
+    evalStatus: 'completed',
+    chatScores: {
+      overall: cfg.overallScore,
+      dimensions: Object.fromEntries(cfg.dimensions.map((d) => [d.key, d.score])),
+    },
+    chainScores: {
+      overall: cfg.overallScore - 0.05,
+      tool_chain_quality: cfg.dimensions.find((d) => d.key === 'tool_use')?.score,
+    },
+    chatModel: 'glm-4.6',
+    chainModel: 'glm-4.6',
+    summary: cfg.dimensions
+      .map((d) => `${d.label} ${d.score.toFixed(1)}: ${d.comment}`)
+      .join('\n'),
+    rawChatResp: { dimensions: cfg.dimensions },
+    rawChainResp: null,
+    artifactPath: undefined,
+    metadata: { dimensions: cfg.dimensions },
+    createdAt: bundle?.session.updatedAt ?? '2026-05-13T08:00:00Z',
+    completedAt: bundle?.session.updatedAt ?? '2026-05-13T08:00:00Z',
+    updatedAt: bundle?.session.updatedAt ?? '2026-05-13T08:00:00Z',
+  }
+})
+
+export function evalsForSession(sessionId: string): AgentQualityEval[] {
+  return DEMO_QUALITY_EVALS.filter((e) => e.sessionId === sessionId)
+}

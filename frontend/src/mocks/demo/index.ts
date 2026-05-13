@@ -1,6 +1,7 @@
 import type { RequestHandler } from 'msw'
 
 import { isDemoMode } from './env'
+import { agentAuditHandlers } from './handlers/agent-audit'
 import { agentRestHandlers } from './handlers/agent-rest'
 import { aiopsHandlers } from './handlers/aiops'
 import { authHandlers } from './handlers/auth'
@@ -13,6 +14,7 @@ export function getDemoHandlers(): RequestHandler[] {
     ...authHandlers,
     ...aiopsHandlers,
     ...opsReportHandlers,
+    ...agentAuditHandlers,
     ...agentRestHandlers,
     ...peripheralHandlers,
   ]
